@@ -1,0 +1,13 @@
+[package]
+name = "iou-httpserver"
+version = "0.1.0"
+authors = ["Peter Malmgren <ptmalmgren@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+io-uring = "0.5"
+libc = "*"
+nix = "0.20"
+thiserror = "1.0"
