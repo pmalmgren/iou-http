@@ -104,8 +104,9 @@ impl Server {
 
     pub fn run(&mut self) -> Result<(), IouError> {
         self.accept()?;
+        let mut wait_count = 1;
         loop {
-            self.ring.submitter().submit_and_wait(1)?;
+            self.ring.submitter().submit_and_wait(wait_count)?;
 
             let mut should_accept = false;
             let mut read_fds: Vec<Fd> = Vec::new();
@@ -158,22 +159,25 @@ impl Server {
             }
             if should_accept {
                 self.accept()?;
+                wait_count += 1;
             }
             for fd in poll_fds {
                 self.poll(fd)?;
+                wait_count += 1;
             }
             for fd in read_fds {
                 self.receive(fd)?;
+                wait_count += 1;
             }
         }
     }
 
     fn accept(&mut self) -> Result<(), IouError> {
-        let mut address = libc::sockaddr {
+        let address = libc::sockaddr {
             sa_family: 0,
             sa_data: [0 as libc::c_char; 14],
         };
-        let mut address_length: libc::socklen_t = mem::size_of::<libc::sockaddr>() as _;
+        let address_length: libc::socklen_t = mem::size_of::<libc::sockaddr>() as _;
         let event = EventType::Accept(AcceptParams {
             address,
             address_length,
