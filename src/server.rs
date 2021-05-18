@@ -178,10 +178,15 @@ impl Server {
             address,
             address_length,
         });
-        let accept = opcode::Accept::new(Fd(self.raw_fd), &mut address, &mut address_length)
-            .build()
-            .user_data(self.user_data);
         self.events.insert(self.user_data, event);
+        let accept = match self.events.get_mut(&self.user_data).unwrap() {
+            EventType::Accept(ref mut ap) => {
+                opcode::Accept::new(Fd(self.raw_fd), &mut ap.address, &mut ap.address_length)
+                            .build()
+                            .user_data(self.user_data)
+            },
+            _ => panic!("unreachable code"),
+        };
         self.user_data += 1;
         unsafe {
             self.ring.submission().push(&accept)?;
