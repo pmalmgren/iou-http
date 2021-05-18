@@ -144,7 +144,8 @@ impl Server {
                                 return Err(io::Error::from_raw_os_error(-ret).into());
                             }
                             debug!("socket {:?} received data {:?}", receive.fd, receive.buf);
-                            read_fds.push(receive.fd);
+                            // TODO should this call poll or recv?
+                            poll_fds.push(receive.fd);
                         }
                         EventType::Send => {}
                     }
