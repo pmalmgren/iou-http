@@ -103,13 +103,7 @@ impl Server {
     pub fn run(&mut self) -> Result<(), IouError> {
         self.accept()?;
         loop {
-            match self.ring.submitter().submit_and_wait(1) {
-                Err(e) => {
-                    eprintln!("Error submitting accept: {:?}", e);
-                    continue;
-                }
-                Ok(_) => {}
-            };
+            self.ring.submitter().submit_and_wait(1)?;
 
             let mut should_accept = false;
             let mut read_fds: Vec<Fd> = Vec::new();
@@ -127,16 +121,9 @@ impl Server {
                             } else {
                                 return Err(io::Error::from_raw_os_error(-ret).into());
                             };
-                            let socket = SocketParams::new_from_accept_params(accept, fd);
-                            match socket {
-                                Ok(ref sock) => {
-                                    println!("Received connection from {:?}", sock.address);
-                                    poll_fds.push(sock.fd);
-                                }
-                                Err(e) => {
-                                    println!("Error accepting connection {:?}", e);
-                                }
-                            };
+                            let socket = SocketParams::new_from_accept_params(accept, fd)?;
+                            println!("Received connection from {:?}", socket.address);
+                            poll_fds.push(socket.fd);
 
                             should_accept = true;
                         }
@@ -147,13 +134,11 @@ impl Server {
                             read_fds.push(poll.fd);
                         }
                         EventType::Recv(receive) => {
-                            if ret > 0 {
-                                println!("received data {:?}", receive.buf);
-                                read_fds.push(receive.fd);
-                            } else {
-                                // TODO handle this error
-                                eprintln!("receive error {}", io::Error::from_raw_os_error(-ret));
+                            if ret <= 0 {
+                                return Err(io::Error::from_raw_os_error(-ret).into());
                             }
+                            println!("received data {:?}", receive.buf);
+                            read_fds.push(receive.fd);
                         }
                         EventType::Send => {}
                     }
@@ -177,26 +162,19 @@ impl Server {
     }
 
     fn accept(&mut self) -> Result<(), IouError> {
-        let address = libc::sockaddr {
+        let mut address = libc::sockaddr {
             sa_family: 0,
             sa_data: [0 as libc::c_char; 14],
         };
-        let address_length: libc::socklen_t = mem::size_of::<libc::sockaddr>() as _;
+        let mut address_length: libc::socklen_t = mem::size_of::<libc::sockaddr>() as _;
         let event = EventType::Accept(AcceptParams {
             address,
             address_length,
         });
-        self.events.insert(self.user_data, event);
-        let accept = match self.events.get_mut(&self.user_data).unwrap() {
-            EventType::Accept(ref mut params) => opcode::Accept::new(
-                Fd(self.raw_fd),
-                &mut params.address,
-                &mut params.address_length,
-            )
+        let accept = opcode::Accept::new(Fd(self.raw_fd), &mut address, &mut address_length)
             .build()
-            .user_data(self.user_data),
-            _ => panic!("This should not happen"),
-        };
+            .user_data(self.user_data);
+        self.events.insert(self.user_data, event);
         self.user_data += 1;
         unsafe {
             self.ring.submission().push(&accept)?;
