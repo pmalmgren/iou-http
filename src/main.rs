@@ -1,4 +1,9 @@
-use io_uring::{opcode, squeue::{PushError, Entry}, types, IoUring};
+use io_uring::{
+    opcode,
+    squeue::{Entry, PushError},
+    types::Fd,
+    IoUring,
+};
 use std::collections::HashMap;
 use std::env;
 use std::net::ToSocketAddrs;
@@ -6,7 +11,10 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::{io, mem, net};
 
 use libc;
-use nix::sys::socket::{InetAddr, SockAddr};
+use nix::sys::{
+    ptrace::Event,
+    socket::{InetAddr, SockAddr},
+};
 use thiserror::Error;
 // https://github.com/dtolnay/thiserror
 
@@ -25,6 +33,7 @@ pub enum IouError {
 
 enum EventType {
     Accept(AcceptParams),
+    Poll(PollParams),
     Recv(ReceiveParams),
     Send,
 }
@@ -34,18 +43,22 @@ struct AcceptParams {
     address_length: libc::socklen_t,
 }
 
+struct PollParams {
+    fd: Fd,
+}
+
 struct ReceiveParams {
     buf: [u8; 512],
-    fd: i32,
+    fd: Fd,
 }
 
 struct SocketParams {
-    fd: i32,
+    fd: Fd,
     address: SockAddr,
 }
 
 impl SocketParams {
-    fn new_from_accept_params(accept_params: AcceptParams, fd: i32) -> Result<Self, IouError> {
+    fn new_from_accept_params(accept_params: AcceptParams, fd: Fd) -> Result<Self, IouError> {
         let address = match accept_params.address.sa_family {
             AF_INET => unsafe {
                 Ok(SockAddr::Inet(InetAddr::V4(
@@ -105,7 +118,8 @@ impl Server {
             };
 
             let mut should_accept = false;
-            let mut read_fds: Vec<i32> = Vec::new();
+            let mut read_fds: Vec<Fd> = Vec::new();
+            let mut poll_fds: Vec<Fd> = Vec::new();
             for cqe in self.ring.completion() {
                 let ret = cqe.result();
                 let user_data = cqe.user_data();
@@ -114,14 +128,16 @@ impl Server {
                     match event {
                         EventType::Accept(accept) => {
                             // create socket struct
-                            if ret < 0 {
+                            let fd = if ret >= 0 {
+                                Fd(ret)
+                            } else {
                                 return Err(io::Error::from_raw_os_error(-ret).into());
-                            }
-                            let socket = SocketParams::new_from_accept_params(accept, ret);
+                            };
+                            let socket = SocketParams::new_from_accept_params(accept, fd);
                             match socket {
                                 Ok(ref sock) => {
                                     println!("Received connection from {:?}", sock.address);
-                                    read_fds.push(sock.fd);
+                                    poll_fds.push(sock.fd);
                                 }
                                 Err(e) => {
                                     println!("Error accepting connection {:?}", e);
@@ -130,13 +146,19 @@ impl Server {
 
                             should_accept = true;
                         }
+                        EventType::Poll(poll) => {
+                            if ret < 0 {
+                                return Err(io::Error::from_raw_os_error(-ret).into());
+                            }
+                            read_fds.push(poll.fd);
+                        }
                         EventType::Recv(receive) => {
                             if ret > 0 {
                                 println!("received data {:?}", receive.buf);
                                 read_fds.push(receive.fd);
                             } else {
                                 // TODO handle this error
-                                eprintln!("receive error {}", io::Error::from_raw_os_error(-ret));;
+                                eprintln!("receive error {}", io::Error::from_raw_os_error(-ret));
                             }
                         }
                         EventType::Send => {}
@@ -150,6 +172,9 @@ impl Server {
             }
             if should_accept {
                 self.accept()?;
+            }
+            for fd in poll_fds {
+                self.poll(fd)?;
             }
             for fd in read_fds {
                 self.receive(fd)?;
@@ -170,7 +195,7 @@ impl Server {
         self.events.insert(self.user_data, event);
         let accept = match self.events.get_mut(&self.user_data).unwrap() {
             EventType::Accept(ref mut params) => opcode::Accept::new(
-                types::Fd(self.raw_fd),
+                Fd(self.raw_fd),
                 &mut params.address,
                 &mut params.address_length,
             )
@@ -179,23 +204,34 @@ impl Server {
             _ => panic!("This should not happen"),
         };
         self.user_data += 1;
-        unsafe { self.ring.submission().push(&accept)?; }
+        unsafe {
+            self.ring.submission().push(&accept)?;
+        }
         Ok(())
     }
 
-    fn receive(&mut self, fd: i32) -> Result<(), IouError> {
+    fn receive(&mut self, fd: Fd) -> Result<(), IouError> {
         let mut buf = [0; 512];
-        let receive = opcode::Recv::new(types::Fd(fd), buf.as_mut_ptr(), buf.len() as u32)
+        let receive = opcode::Recv::new(fd, buf.as_mut_ptr(), buf.len() as u32)
             .flags(libc::MSG_WAITALL)
             .build()
             .user_data(self.user_data);
-        self.events.insert(self.user_data, EventType::Recv(ReceiveParams {
-            buf,
-            fd
-        }));
+        self.events
+            .insert(self.user_data, EventType::Recv(ReceiveParams { buf, fd }));
+        self.user_data += 1;
+        unsafe { self.ring.submission().push(&receive)? }
+        Ok(())
+    }
+
+    fn poll(&mut self, fd: Fd) -> Result<(), IouError> {
+        let poll = opcode::PollAdd::new(fd, 0)
+            .build()
+            .user_data(self.user_data);
+        self.events
+            .insert(self.user_data, EventType::Poll(PollParams { fd }));
         self.user_data += 1;
         unsafe {
-            self.ring.submission().push(&receive)?
+            self.ring.submission().push(&poll)?;
         }
         Ok(())
     }
