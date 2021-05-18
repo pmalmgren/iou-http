@@ -1,4 +1,5 @@
 use io_uring::{opcode, squeue::PushError, types::Fd, IoUring};
+use log::{debug, error, info};
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -86,6 +87,7 @@ pub struct Server {
 impl Server {
     pub fn bind<A: ToSocketAddrs>(addr: A) -> Result<Server, IouError> {
         let socket = net::TcpListener::bind(addr)?;
+        info!("listening on: {}", socket.local_addr().unwrap());
         let raw_fd = socket.as_raw_fd();
         let ring = IoUring::new(8)?;
         let user_data = 1u64;
@@ -119,31 +121,35 @@ impl Server {
                             let fd = if ret >= 0 {
                                 Fd(ret)
                             } else {
+                                error!("accept error: {}", ret);
                                 return Err(io::Error::from_raw_os_error(-ret).into());
                             };
                             let socket = SocketParams::new_from_accept_params(accept, fd)?;
-                            println!("Received connection from {:?}", socket.address);
+                            debug!("Received connection from {:?}", socket.address);
                             poll_fds.push(socket.fd);
 
                             should_accept = true;
                         }
                         EventType::Poll(poll) => {
                             if ret < 0 {
+                                error!("poll error: {}", ret);
                                 return Err(io::Error::from_raw_os_error(-ret).into());
                             }
+                            debug!("socket {:?} poll result: {}", poll.fd, ret);
                             read_fds.push(poll.fd);
                         }
                         EventType::Recv(receive) => {
                             if ret <= 0 {
+                                error!("recv error: {}", ret);
                                 return Err(io::Error::from_raw_os_error(-ret).into());
                             }
-                            println!("received data {:?}", receive.buf);
+                            debug!("socket {:?} received data {:?}", receive.fd, receive.buf);
                             read_fds.push(receive.fd);
                         }
                         EventType::Send => {}
                     }
                 } else {
-                    eprintln!(
+                    error!(
                         "got completion event from unknown submission: {}",
                         user_data
                     );
