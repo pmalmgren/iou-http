@@ -47,12 +47,12 @@ struct ReceiveParams {
     fd: Fd,
 }
 
-struct SocketParams {
+struct Peer {
     fd: Fd,
     address: SockAddr,
 }
 
-impl SocketParams {
+impl Peer {
     fn new_from_accept_params(accept_params: AcceptParams, fd: Fd) -> Result<Self, IouError> {
         let address = match accept_params.address.sa_family {
             AF_INET => unsafe {
@@ -72,7 +72,7 @@ impl SocketParams {
             )),
         }?;
 
-        Ok(SocketParams { fd, address })
+        Ok(Peer { fd, address })
     }
 }
 
@@ -125,7 +125,7 @@ impl Server {
                                 error!("accept error: {}", ret);
                                 return Err(io::Error::from_raw_os_error(-ret).into());
                             };
-                            let socket = SocketParams::new_from_accept_params(accept, fd)?;
+                            let socket = Peer::new_from_accept_params(accept, fd)?;
                             debug!("Received connection from {:?}", socket.address);
                             poll_fds.push(socket.fd);
 
