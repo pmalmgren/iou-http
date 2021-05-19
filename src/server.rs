@@ -104,9 +104,8 @@ impl Server {
 
     pub fn run(&mut self) -> Result<(), IouError> {
         self.accept()?;
-        let mut wait_count = 1;
         loop {
-            self.ring.submitter().submit_and_wait(wait_count)?;
+            self.ring.submitter().submit_and_wait(1)?;
 
             let mut should_accept = false;
             let mut read_fds: Vec<Fd> = Vec::new();
@@ -163,15 +162,12 @@ impl Server {
             }
             if should_accept {
                 self.accept()?;
-                wait_count += 1;
             }
             for fd in poll_fds {
                 self.poll(fd)?;
-                wait_count += 1;
             }
             for fd in read_fds {
                 self.receive(fd)?;
-                wait_count += 1;
             }
         }
     }
