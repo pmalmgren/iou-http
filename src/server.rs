@@ -6,10 +6,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::{io, mem, net};
 
 use libc;
-use nix::sys::{
-    ptrace::Event,
-    socket::{InetAddr, SockAddr},
-};
+use nix::sys::socket::{InetAddr, SockAddr};
 use thiserror::Error;
 // https://github.com/dtolnay/thiserror
 
@@ -28,18 +25,12 @@ pub enum IouError {
 
 enum EventType {
     Accept(AcceptParams),
-    Poll(PollParams),
     Recv(ReceiveParams),
-    Send,
 }
 
 struct AcceptParams {
     address: libc::sockaddr,
     address_length: libc::socklen_t,
-}
-
-struct PollParams {
-    fd: Fd,
 }
 
 struct ReceiveParams {
@@ -110,7 +101,6 @@ impl Server {
 
             let mut should_accept = false;
             let mut read_fds: Vec<Fd> = Vec::new();
-            let mut poll_fds: Vec<Fd> = Vec::new();
             for cqe in self.ring.completion() {
                 let ret = cqe.result();
                 let user_data = cqe.user_data();
@@ -131,14 +121,6 @@ impl Server {
 
                             should_accept = true;
                         }
-                        EventType::Poll(poll) => {
-                            if ret < 0 {
-                                error!("poll error: {}", ret);
-                                return Err(io::Error::from_raw_os_error(-ret).into());
-                            }
-                            debug!("socket {:?} poll result: {}", poll.fd, ret);
-                            read_fds.push(poll.fd);
-                        }
                         EventType::Recv(receive) => {
                             if ret < 0 {
                                 let err = io::Error::from_raw_os_error(-ret);
@@ -152,7 +134,6 @@ impl Server {
                             // TODO should this call poll or recv?
                             read_fds.push(receive.fd);
                         }
-                        EventType::Send => {}
                     }
                 } else {
                     error!(
@@ -163,9 +144,6 @@ impl Server {
             }
             if should_accept {
                 self.accept()?;
-            }
-            for fd in poll_fds {
-                self.poll(fd)?;
             }
             for fd in read_fds {
                 self.receive(fd)?;
@@ -215,19 +193,6 @@ impl Server {
         };
         self.user_data += 1;
         unsafe { self.ring.submission().push(&receive)? }
-        Ok(())
-    }
-
-    fn poll(&mut self, fd: Fd) -> Result<(), IouError> {
-        let poll = opcode::PollAdd::new(fd, 0)
-            .build()
-            .user_data(self.user_data);
-        self.events
-            .insert(self.user_data, EventType::Poll(PollParams { fd }));
-        self.user_data += 1;
-        unsafe {
-            self.ring.submission().push(&poll)?;
-        }
         Ok(())
     }
 }
