@@ -26,6 +26,7 @@ pub enum IouError {
 enum EventType {
     Accept(AcceptParams),
     Recv(ReceiveParams),
+    Close(Fd),
 }
 
 struct AcceptParams {
@@ -74,6 +75,7 @@ pub struct Server {
     events: HashMap<u64, EventType>,
     socket: net::TcpListener,
     raw_fd: RawFd,
+    peers: HashMap<i32, Peer>,
 }
 
 impl Server {
@@ -84,6 +86,7 @@ impl Server {
         let ring = IoUring::new(8)?;
         let user_data = 1u64;
         let events: HashMap<u64, EventType> = HashMap::new();
+        let peers: HashMap<i32, Peer> = HashMap::new();
 
         Ok(Server {
             socket,
@@ -91,6 +94,7 @@ impl Server {
             events,
             ring,
             user_data,
+            peers,
         })
     }
 
@@ -101,6 +105,7 @@ impl Server {
 
             let mut should_accept = false;
             let mut read_fds: Vec<Fd> = Vec::new();
+            let mut close_fds: Vec<Fd> = Vec::new();
             for cqe in self.ring.completion() {
                 let ret = cqe.result();
                 let user_data = cqe.user_data();
@@ -115,10 +120,10 @@ impl Server {
                                 error!("accept error: {}", ret);
                                 return Err(io::Error::from_raw_os_error(-ret).into());
                             };
-                            let socket = Peer::new_from_accept_params(accept, fd)?;
-                            debug!("Received connection from {:?}", socket.address);
-                            read_fds.push(socket.fd);
-
+                            let peer = Peer::new_from_accept_params(accept, fd)?;
+                            debug!("Received connection from {:?}", peer.address);
+                            self.peers.insert(ret, peer);
+                            read_fds.push(fd);
                             should_accept = true;
                         }
                         EventType::Recv(receive) => {
@@ -128,11 +133,21 @@ impl Server {
                             }
                             if ret == 0 {
                                 info!("client {:?} disconnected", receive.fd);
-                                break;
+                                close_fds.push(receive.fd);
+                                self.peers.remove(&(receive.fd.0 as i32));
+                                continue;
                             }
+
                             debug!("socket {:?} received data {:?}", receive.fd, receive.buf);
-                            // TODO should this call poll or recv?
                             read_fds.push(receive.fd);
+                        }
+                        EventType::Close(fd) => {
+                            if ret < 0 {
+                                let err = io::Error::from_raw_os_error(-ret);
+                                error!("close error {:?}: {:?} ", fd, err);
+                            }
+                            debug!("closed socket {:?}", fd);
+                            self.peers.remove(&fd.0);
                         }
                     }
                 } else {
@@ -148,7 +163,21 @@ impl Server {
             for fd in read_fds {
                 self.receive(fd)?;
             }
+            for fd in close_fds {
+                self.close(fd)?;
+            }
         }
+    }
+
+    fn close(&mut self, fd: Fd) -> Result<(), IouError> {
+        let event = EventType::Close(fd);
+        let close = opcode::Close::new(fd).build().user_data(self.user_data);
+        self.events.insert(self.user_data, event);
+        self.user_data += 1;
+        unsafe {
+            self.ring.submission().push(&close)?;
+        }
+        Ok(())
     }
 
     fn accept(&mut self) -> Result<(), IouError> {
