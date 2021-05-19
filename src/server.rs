@@ -127,7 +127,7 @@ impl Server {
                             };
                             let socket = Peer::new_from_accept_params(accept, fd)?;
                             debug!("Received connection from {:?}", socket.address);
-                            poll_fds.push(socket.fd);
+                            read_fds.push(socket.fd);
 
                             should_accept = true;
                         }
@@ -140,13 +140,17 @@ impl Server {
                             read_fds.push(poll.fd);
                         }
                         EventType::Recv(receive) => {
-                            if ret <= 0 {
-                                error!("recv error: {}", ret);
-                                return Err(io::Error::from_raw_os_error(-ret).into());
+                            if ret < 0 {
+                                let err = io::Error::from_raw_os_error(-ret);
+                                error!("recv error on fd {:?}: {:?} ", receive.fd, err);
+                            }
+                            if ret == 0 {
+                                info!("client {:?} disconnected", receive.fd);
+                                break;
                             }
                             debug!("socket {:?} received data {:?}", receive.fd, receive.buf);
                             // TODO should this call poll or recv?
-                            poll_fds.push(receive.fd);
+                            read_fds.push(receive.fd);
                         }
                         EventType::Send => {}
                     }
@@ -199,13 +203,19 @@ impl Server {
     }
 
     fn receive(&mut self, fd: Fd) -> Result<(), IouError> {
-        let mut buf = [0; 512];
-        let receive = opcode::Recv::new(fd, buf.as_mut_ptr(), buf.len() as u32)
-            .flags(libc::MSG_WAITALL)
-            .build()
-            .user_data(self.user_data);
+        let buf = [0; 512];
         self.events
             .insert(self.user_data, EventType::Recv(ReceiveParams { buf, fd }));
+
+        let receive = match self.events.get_mut(&self.user_data).unwrap() {
+            EventType::Recv(ref mut params) => {
+                opcode::Recv::new(fd, params.buf.as_mut_ptr(), buf.len() as u32)
+                    .flags(libc::MSG_WAITALL)
+                    .build()
+                    .user_data(self.user_data)
+            },
+            _ => panic!("Unreachable code"),
+        };
         self.user_data += 1;
         unsafe { self.ring.submission().push(&receive)? }
         Ok(())
