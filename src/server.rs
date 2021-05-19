@@ -12,6 +12,7 @@ use thiserror::Error;
 
 const AF_INET: u16 = libc::AF_INET as u16;
 const AF_INET6: u16 = libc::AF_INET6 as u16;
+const BUF_SIZE: usize = 512;
 
 #[derive(Error, Debug)]
 pub enum IouError {
@@ -35,8 +36,19 @@ struct AcceptParams {
 }
 
 struct ReceiveParams {
-    buf: [u8; 512],
+    buf: Vec<u8>,
     fd: Fd,
+    curr_chunk: usize,
+}
+
+impl ReceiveParams {
+    fn new(fd: Fd) -> ReceiveParams {
+        ReceiveParams {
+            fd,
+            buf: Vec::new(),
+            curr_chunk: 0,
+        }
+    }
 }
 
 struct Peer {
@@ -104,7 +116,7 @@ impl Server {
             self.ring.submitter().submit_and_wait(1)?;
 
             let mut should_accept = false;
-            let mut read_fds: Vec<Fd> = Vec::new();
+            let mut read_fds: Vec<ReceiveParams> = Vec::new();
             let mut close_fds: Vec<Fd> = Vec::new();
             for cqe in self.ring.completion() {
                 let ret = cqe.result();
@@ -123,7 +135,7 @@ impl Server {
                             let peer = Peer::new_from_accept_params(accept, fd)?;
                             debug!("Received connection from {:?}", peer.address);
                             self.peers.insert(ret, peer);
-                            read_fds.push(fd);
+                            read_fds.push(ReceiveParams::new(fd));
                             should_accept = true;
                         }
                         EventType::Recv(receive) => {
@@ -134,12 +146,20 @@ impl Server {
                             if ret == 0 {
                                 info!("client {:?} disconnected", receive.fd);
                                 close_fds.push(receive.fd);
-                                self.peers.remove(&(receive.fd.0 as i32));
                                 continue;
                             }
 
-                            debug!("socket {:?} received data {:?}", receive.fd, receive.buf);
-                            read_fds.push(receive.fd);
+                            if (ret as usize) < BUF_SIZE {
+                                let data: String = std::str::from_utf8(&receive.buf)
+                                    .unwrap()
+                                    .chars()
+                                    .take_while(|c| *c != '\0')
+                                    .collect();
+                                debug!("socket {:?} received data {:?}", receive.fd, data);
+                                read_fds.push(ReceiveParams::new(receive.fd));
+                            } else {
+                                read_fds.push(receive);
+                            }
                         }
                         EventType::Close(fd) => {
                             if ret < 0 {
@@ -160,8 +180,8 @@ impl Server {
             if should_accept {
                 self.accept()?;
             }
-            for fd in read_fds {
-                self.receive(fd)?;
+            for receive_param in read_fds {
+                self.receive(receive_param)?;
             }
             for fd in close_fds {
                 self.close(fd)?;
@@ -194,9 +214,9 @@ impl Server {
         let accept = match self.events.get_mut(&self.user_data).unwrap() {
             EventType::Accept(ref mut ap) => {
                 opcode::Accept::new(Fd(self.raw_fd), &mut ap.address, &mut ap.address_length)
-                            .build()
-                            .user_data(self.user_data)
-            },
+                    .build()
+                    .user_data(self.user_data)
+            }
             _ => panic!("unreachable code"),
         };
         self.user_data += 1;
@@ -206,18 +226,22 @@ impl Server {
         Ok(())
     }
 
-    fn receive(&mut self, fd: Fd) -> Result<(), IouError> {
-        let buf = [0; 512];
+    fn receive(&mut self, mut receive_params: ReceiveParams) -> Result<(), IouError> {
+        receive_params.buf.extend_from_slice(&[0; 512]);
+        receive_params.curr_chunk += 1;
         self.events
-            .insert(self.user_data, EventType::Recv(ReceiveParams { buf, fd }));
+            .insert(self.user_data, EventType::Recv(receive_params));
 
         let receive = match self.events.get_mut(&self.user_data).unwrap() {
             EventType::Recv(ref mut params) => {
-                opcode::Recv::new(fd, params.buf.as_mut_ptr(), buf.len() as u32)
+                let start = (params.curr_chunk - 1) * 512;
+                let end = start + 512;
+                let data_buf = params.buf[start..end].as_mut_ptr();
+                opcode::Recv::new(params.fd, data_buf, BUF_SIZE as u32)
                     .flags(libc::MSG_WAITALL)
                     .build()
                     .user_data(self.user_data)
-            },
+            }
             _ => panic!("Unreachable code"),
         };
         self.user_data += 1;
