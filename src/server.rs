@@ -76,6 +76,7 @@ impl Peer {
     }
 }
 
+#[allow(dead_code)]
 pub struct Server {
     ring: IoUring,
     user_data: u64,
