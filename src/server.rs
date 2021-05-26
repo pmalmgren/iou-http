@@ -12,7 +12,7 @@ use thiserror::Error;
 
 const AF_INET: u16 = libc::AF_INET as u16;
 const AF_INET6: u16 = libc::AF_INET6 as u16;
-const BUF_SIZE: usize = 512;
+const BUF_SIZE: usize = BUF_SIZE;
 
 #[derive(Error, Debug)]
 pub enum IouError {
@@ -155,7 +155,7 @@ impl Server {
                                     .chars()
                                     .take_while(|c| *c != '\0')
                                     .collect();
-                                debug!("socket {:?} received data {:?}", receive.fd, data);
+                                debug!("socket {:?} received data {}", receive.fd, data.trim_end_matches("\r\n"));
                                 read_fds.push(ReceiveParams::new(receive.fd));
                             } else {
                                 read_fds.push(receive);
@@ -227,15 +227,15 @@ impl Server {
     }
 
     fn receive(&mut self, mut receive_params: ReceiveParams) -> Result<(), IouError> {
-        receive_params.buf.extend_from_slice(&[0; 512]);
+        receive_params.buf.extend_from_slice(&[0; BUF_SIZE]);
         receive_params.curr_chunk += 1;
         self.events
             .insert(self.user_data, EventType::Recv(receive_params));
 
         let receive = match self.events.get_mut(&self.user_data).unwrap() {
             EventType::Recv(ref mut params) => {
-                let start = (params.curr_chunk - 1) * 512;
-                let end = start + 512;
+                let start = (params.curr_chunk - 1) * BUF_SIZE;
+                let end = start + BUF_SIZE;
                 let data_buf = params.buf[start..end].as_mut_ptr();
                 opcode::Recv::new(params.fd, data_buf, BUF_SIZE as u32)
                     .flags(libc::MSG_WAITALL)
