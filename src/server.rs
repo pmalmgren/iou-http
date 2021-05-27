@@ -12,7 +12,7 @@ use thiserror::Error;
 
 const AF_INET: u16 = libc::AF_INET as u16;
 const AF_INET6: u16 = libc::AF_INET6 as u16;
-const BUF_SIZE: usize = BUF_SIZE;
+const BUF_SIZE: usize = 512;
 
 #[derive(Error, Debug)]
 pub enum IouError {
