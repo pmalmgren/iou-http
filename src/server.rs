@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::{io, mem, net};
+use httparse::{Request, EMPTY_HEADER, Error as HttpParseError};
 
 use libc;
 use nix::sys::socket::{InetAddr, SockAddr};
@@ -22,12 +23,15 @@ pub enum IouError {
     Push(#[from] PushError),
     #[error("IO Error: {0}")]
     Io(#[from] io::Error),
+    #[error("Error parsing HTTP headers: {0}")]
+    HttpParse(#[from] HttpParseError)
 }
 
 enum EventType {
     Accept(AcceptParams),
     Recv(ReceiveParams),
     Close(Fd),
+    Send(SendParams),
 }
 
 struct AcceptParams {
@@ -39,6 +43,11 @@ struct ReceiveParams {
     buf: Vec<u8>,
     fd: Fd,
     curr_chunk: usize,
+}
+
+struct SendParams {
+    buf: Vec<u8>,
+    fd: Fd,
 }
 
 impl ReceiveParams {
@@ -90,6 +99,19 @@ pub struct Server {
     peers: HashMap<i32, Peer>,
 }
 
+fn complete_http_request(buf: &[u8]) -> bool {
+    // a complete HTTP request is of the form
+    // VERB /PATH HTTP/VERSION\r\nHeader: value...\r\n
+    let iter = buf.windows(4);
+
+    for slice in iter {
+        if slice == b"\r\n\r\n" {
+            return true;
+        }
+    }
+    false
+}
+
 impl Server {
     pub fn bind<A: ToSocketAddrs>(addr: A) -> Result<Server, IouError> {
         let socket = net::TcpListener::bind(addr)?;
@@ -118,6 +140,7 @@ impl Server {
             let mut should_accept = false;
             let mut read_fds: Vec<ReceiveParams> = Vec::new();
             let mut close_fds: Vec<Fd> = Vec::new();
+            let mut send_fds: Vec<SendParams> = Vec::new();
             for cqe in self.ring.completion() {
                 let ret = cqe.result();
                 let user_data = cqe.user_data();
@@ -149,13 +172,21 @@ impl Server {
                                 continue;
                             }
 
+                            let mut headers = [EMPTY_HEADER; 64];
+                            let mut request = Request::new(&mut headers);
+                            if complete_http_request(&receive.buf) {
+                                request.parse(&receive.buf)?;
+                                debug!("{:?}", request);
+
+                                let response = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHello".as_bytes();
+                                send_fds.push(SendParams {
+                                    buf: response.to_vec(),
+                                    fd: receive.fd
+                                });
+                            }
+
+                            // TODO handle HTTP Keep Alive
                             if (ret as usize) < BUF_SIZE {
-                                let data: String = std::str::from_utf8(&receive.buf)
-                                    .unwrap()
-                                    .chars()
-                                    .take_while(|c| *c != '\0')
-                                    .collect();
-                                debug!("socket {:?} received data {}", receive.fd, data.trim_end_matches("\r\n"));
                                 read_fds.push(ReceiveParams::new(receive.fd));
                             } else {
                                 read_fds.push(receive);
@@ -168,6 +199,10 @@ impl Server {
                             }
                             debug!("closed socket {:?}", fd);
                             self.peers.remove(&fd.0);
+                        },
+                        EventType::Send(send_params) => {
+                            // TODO handle partial write
+
                         }
                     }
                 } else {
@@ -182,6 +217,9 @@ impl Server {
             }
             for receive_param in read_fds {
                 self.receive(receive_param)?;
+            }
+            for send_param in send_fds {
+                self.send(send_param)?;
             }
             for fd in close_fds {
                 self.close(fd)?;
@@ -246,6 +284,25 @@ impl Server {
         };
         self.user_data += 1;
         unsafe { self.ring.submission().push(&receive)? }
+        Ok(())
+    }
+
+    fn send(&mut self, mut send_params: SendParams) -> Result<(), IouError> {
+        self.events
+            .insert(self.user_data, EventType::Send(send_params));
+        
+        let send = match self.events.get_mut(&self.user_data).unwrap() {
+            EventType::Send(ref mut params) => {
+                opcode::Send::new(params.fd, params.buf.as_mut_ptr(), params.buf.len() as u32)
+                    .build()
+                    .user_data(self.user_data)
+            },
+            _ => panic!("unreachable code")
+        };
+        
+        self.user_data += 1;
+        
+        unsafe { self.ring.submission().push(&send)? }
         Ok(())
     }
 }

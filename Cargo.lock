@@ -85,6 +85,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "httparse"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a87b616e37e93c22fb19bcd386f02f3af5ea98a25670ad0fce773de23c5e68"
+
+[[package]]
 name = "humantime"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -108,6 +114,7 @@ name = "iou-httpserver"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "httparse",
  "io-uring",
  "libc",
  "log",
