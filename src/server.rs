@@ -6,15 +6,13 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::{io, mem, net};
 
 use libc;
-use nix::sys::{
-    ptrace::Event,
-    socket::{InetAddr, SockAddr},
-};
+use nix::sys::socket::{InetAddr, SockAddr};
 use thiserror::Error;
 // https://github.com/dtolnay/thiserror
 
 const AF_INET: u16 = libc::AF_INET as u16;
 const AF_INET6: u16 = libc::AF_INET6 as u16;
+const BUF_SIZE: usize = BUF_SIZE;
 
 #[derive(Error, Debug)]
 pub enum IouError {
@@ -28,9 +26,8 @@ pub enum IouError {
 
 enum EventType {
     Accept(AcceptParams),
-    Poll(PollParams),
     Recv(ReceiveParams),
-    Send,
+    Close(Fd),
 }
 
 struct AcceptParams {
@@ -38,13 +35,20 @@ struct AcceptParams {
     address_length: libc::socklen_t,
 }
 
-struct PollParams {
+struct ReceiveParams {
+    buf: Vec<u8>,
     fd: Fd,
+    curr_chunk: usize,
 }
 
-struct ReceiveParams {
-    buf: [u8; 512],
-    fd: Fd,
+impl ReceiveParams {
+    fn new(fd: Fd) -> ReceiveParams {
+        ReceiveParams {
+            fd,
+            buf: Vec::new(),
+            curr_chunk: 0,
+        }
+    }
 }
 
 struct Peer {
@@ -76,12 +80,14 @@ impl Peer {
     }
 }
 
+#[allow(dead_code)]
 pub struct Server {
     ring: IoUring,
     user_data: u64,
     events: HashMap<u64, EventType>,
     socket: net::TcpListener,
     raw_fd: RawFd,
+    peers: HashMap<i32, Peer>,
 }
 
 impl Server {
@@ -92,6 +98,7 @@ impl Server {
         let ring = IoUring::new(8)?;
         let user_data = 1u64;
         let events: HashMap<u64, EventType> = HashMap::new();
+        let peers: HashMap<i32, Peer> = HashMap::new();
 
         Ok(Server {
             socket,
@@ -99,6 +106,7 @@ impl Server {
             events,
             ring,
             user_data,
+            peers,
         })
     }
 
@@ -108,8 +116,8 @@ impl Server {
             self.ring.submitter().submit_and_wait(1)?;
 
             let mut should_accept = false;
-            let mut read_fds: Vec<Fd> = Vec::new();
-            let mut poll_fds: Vec<Fd> = Vec::new();
+            let mut read_fds: Vec<ReceiveParams> = Vec::new();
+            let mut close_fds: Vec<Fd> = Vec::new();
             for cqe in self.ring.completion() {
                 let ret = cqe.result();
                 let user_data = cqe.user_data();
@@ -124,19 +132,11 @@ impl Server {
                                 error!("accept error: {}", ret);
                                 return Err(io::Error::from_raw_os_error(-ret).into());
                             };
-                            let socket = Peer::new_from_accept_params(accept, fd)?;
-                            debug!("Received connection from {:?}", socket.address);
-                            read_fds.push(socket.fd);
-
+                            let peer = Peer::new_from_accept_params(accept, fd)?;
+                            debug!("Received connection from {:?}", peer.address);
+                            self.peers.insert(ret, peer);
+                            read_fds.push(ReceiveParams::new(fd));
                             should_accept = true;
-                        }
-                        EventType::Poll(poll) => {
-                            if ret < 0 {
-                                error!("poll error: {}", ret);
-                                return Err(io::Error::from_raw_os_error(-ret).into());
-                            }
-                            debug!("socket {:?} poll result: {}", poll.fd, ret);
-                            read_fds.push(poll.fd);
                         }
                         EventType::Recv(receive) => {
                             if ret < 0 {
@@ -145,13 +145,30 @@ impl Server {
                             }
                             if ret == 0 {
                                 info!("client {:?} disconnected", receive.fd);
-                                break;
+                                close_fds.push(receive.fd);
+                                continue;
                             }
-                            debug!("socket {:?} received data {:?}", receive.fd, receive.buf);
-                            // TODO should this call poll or recv?
-                            read_fds.push(receive.fd);
+
+                            if (ret as usize) < BUF_SIZE {
+                                let data: String = std::str::from_utf8(&receive.buf)
+                                    .unwrap()
+                                    .chars()
+                                    .take_while(|c| *c != '\0')
+                                    .collect();
+                                debug!("socket {:?} received data {}", receive.fd, data.trim_end_matches("\r\n"));
+                                read_fds.push(ReceiveParams::new(receive.fd));
+                            } else {
+                                read_fds.push(receive);
+                            }
                         }
-                        EventType::Send => {}
+                        EventType::Close(fd) => {
+                            if ret < 0 {
+                                let err = io::Error::from_raw_os_error(-ret);
+                                error!("close error {:?}: {:?} ", fd, err);
+                            }
+                            debug!("closed socket {:?}", fd);
+                            self.peers.remove(&fd.0);
+                        }
                     }
                 } else {
                     error!(
@@ -163,13 +180,24 @@ impl Server {
             if should_accept {
                 self.accept()?;
             }
-            for fd in poll_fds {
-                self.poll(fd)?;
+            for receive_param in read_fds {
+                self.receive(receive_param)?;
             }
-            for fd in read_fds {
-                self.receive(fd)?;
+            for fd in close_fds {
+                self.close(fd)?;
             }
         }
+    }
+
+    fn close(&mut self, fd: Fd) -> Result<(), IouError> {
+        let event = EventType::Close(fd);
+        let close = opcode::Close::new(fd).build().user_data(self.user_data);
+        self.events.insert(self.user_data, event);
+        self.user_data += 1;
+        unsafe {
+            self.ring.submission().push(&close)?;
+        }
+        Ok(())
     }
 
     fn accept(&mut self) -> Result<(), IouError> {
@@ -186,9 +214,9 @@ impl Server {
         let accept = match self.events.get_mut(&self.user_data).unwrap() {
             EventType::Accept(ref mut ap) => {
                 opcode::Accept::new(Fd(self.raw_fd), &mut ap.address, &mut ap.address_length)
-                            .build()
-                            .user_data(self.user_data)
-            },
+                    .build()
+                    .user_data(self.user_data)
+            }
             _ => panic!("unreachable code"),
         };
         self.user_data += 1;
@@ -198,35 +226,26 @@ impl Server {
         Ok(())
     }
 
-    fn receive(&mut self, fd: Fd) -> Result<(), IouError> {
-        let buf = [0; 512];
+    fn receive(&mut self, mut receive_params: ReceiveParams) -> Result<(), IouError> {
+        receive_params.buf.extend_from_slice(&[0; BUF_SIZE]);
+        receive_params.curr_chunk += 1;
         self.events
-            .insert(self.user_data, EventType::Recv(ReceiveParams { buf, fd }));
+            .insert(self.user_data, EventType::Recv(receive_params));
 
         let receive = match self.events.get_mut(&self.user_data).unwrap() {
             EventType::Recv(ref mut params) => {
-                opcode::Recv::new(fd, params.buf.as_mut_ptr(), buf.len() as u32)
+                let start = (params.curr_chunk - 1) * BUF_SIZE;
+                let end = start + BUF_SIZE;
+                let data_buf = params.buf[start..end].as_mut_ptr();
+                opcode::Recv::new(params.fd, data_buf, BUF_SIZE as u32)
                     .flags(libc::MSG_WAITALL)
                     .build()
                     .user_data(self.user_data)
-            },
+            }
             _ => panic!("Unreachable code"),
         };
         self.user_data += 1;
         unsafe { self.ring.submission().push(&receive)? }
-        Ok(())
-    }
-
-    fn poll(&mut self, fd: Fd) -> Result<(), IouError> {
-        let poll = opcode::PollAdd::new(fd, 0)
-            .build()
-            .user_data(self.user_data);
-        self.events
-            .insert(self.user_data, EventType::Poll(PollParams { fd }));
-        self.user_data += 1;
-        unsafe {
-            self.ring.submission().push(&poll)?;
-        }
         Ok(())
     }
 }
