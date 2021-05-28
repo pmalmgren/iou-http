@@ -5,6 +5,7 @@ use std::net::ToSocketAddrs;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::{io, mem, net};
 use httparse::{Request, EMPTY_HEADER, Error as HttpParseError};
+use http;
 
 use libc;
 use nix::sys::socket::{InetAddr, SockAddr};
@@ -89,6 +90,8 @@ impl Peer {
     }
 }
 
+pub type HttpHandler = fn(Request) -> http::Response<String>;
+
 #[allow(dead_code)]
 pub struct Server {
     ring: IoUring,
@@ -97,6 +100,7 @@ pub struct Server {
     socket: net::TcpListener,
     raw_fd: RawFd,
     peers: HashMap<i32, Peer>,
+    handler: HttpHandler
 }
 
 fn complete_http_request(buf: &[u8]) -> bool {
@@ -113,7 +117,7 @@ fn complete_http_request(buf: &[u8]) -> bool {
 }
 
 impl Server {
-    pub fn bind<A: ToSocketAddrs>(addr: A) -> Result<Server, IouError> {
+    pub fn new<A: ToSocketAddrs>(addr: A, handler: HttpHandler) -> Result<Server, IouError> {
         let socket = net::TcpListener::bind(addr)?;
         info!("listening on: {}", socket.local_addr().unwrap());
         let raw_fd = socket.as_raw_fd();
@@ -129,6 +133,7 @@ impl Server {
             ring,
             user_data,
             peers,
+            handler,
         })
     }
 
@@ -178,7 +183,16 @@ impl Server {
                                 request.parse(&receive.buf)?;
                                 debug!("{:?}", request);
 
-                                let response = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHello".as_bytes();
+                                let response = (self.handler)(request);
+                                let (parts, body) = response.into_parts();
+                                let mut response = format!("HTTP/1.1 {}\r\n", parts.status);
+                                for (name, value) in parts.headers.iter() {
+                                    // TODO: Deal with to_str().unwrap()
+                                    response.push_str(format!("{}: {}\r\n", name, value.to_str().unwrap()).as_str());
+                                }
+                                response.push_str("\r\n");
+                                response.push_str(body.as_str());
+                                let response = response.as_bytes();
                                 send_fds.push(SendParams {
                                     buf: response.to_vec(),
                                     fd: receive.fd

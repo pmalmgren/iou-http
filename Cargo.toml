@@ -9,6 +9,7 @@ edition = "2018"
 [dependencies]
 clap = "2.33.3"
 httparse = "1.4.1"
+http = "0.2.4"
 pretty_env_logger = "0.4.0"
 io-uring = "0.5"
 libc = "*"

@@ -1,7 +1,7 @@
 TODO
 
-- [ ] Parse HTTP headers
-- [ ] Parse HTTP body (optional for hello world)
+- [x] Parse HTTP headers
+- [x] Parse HTTP body (optional for hello world)
 - [ ] Call handler, write response back to the socket
 - [ ] Add tests for receiving data
 - [ ] Implement an HTTP request handler, using [httparse](https://docs.rs/httparse/1.4.1/httparse/)

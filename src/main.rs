@@ -4,6 +4,8 @@ use clap::{App, Arg};
 use pretty_env_logger;
 use server::Server;
 
+use http::{Response, StatusCode};
+
 fn main() {
     pretty_env_logger::init();
 
@@ -20,6 +22,11 @@ fn main() {
         .value_of("address")
         .expect("Bind address is required");
 
-    let mut server = Server::bind(address).unwrap();
+    let mut server = Server::new(address, |_request| {
+        Response::builder()
+            .status(StatusCode::OK)
+            .body("hello world".to_string())
+            .unwrap()
+    }).unwrap();
     server.run().unwrap();
 }
