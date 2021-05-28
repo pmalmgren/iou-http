@@ -26,7 +26,6 @@ fn main() {
         let body = "hello world".to_string();
         Response::builder()
             .status(StatusCode::OK)
-            .header("Content-Length", body.len())
             .body(body)
             .unwrap()
     }).unwrap();

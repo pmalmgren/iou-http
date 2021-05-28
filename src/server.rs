@@ -186,10 +186,17 @@ impl Server {
 
                                 let response = (self.handler)(request);
                                 let (parts, body) = response.into_parts();
+                                // TODO serialize the HTTP response with less copying
                                 let mut response = format!("HTTP/1.1 {}\r\n", parts.status);
+                                let mut has_content_length: bool = false;
                                 for (name, value) in parts.headers.iter() {
-                                    // TODO: Deal with to_str().unwrap()
-                                    response.push_str(format!("{}: {}\r\n", name, value.to_str().unwrap()).as_str());
+                                    if let Ok(value) = value.to_str() {
+                                        has_content_length = value.to_ascii_lowercase() == "content-length";
+                                        response.push_str(format!("{}: {}\r\n", name, value).as_str());
+                                    }
+                                }
+                                if !has_content_length {
+                                    response.push_str(format!("Content-Length: {}\r\n", body.len()).as_str());
                                 }
                                 response.push_str("\r\n");
                                 response.push_str(body.as_str());
