@@ -46,6 +46,7 @@ struct ReceiveParams {
     curr_chunk: usize,
 }
 
+#[derive(Debug)]
 struct SendParams {
     buf: Vec<u8>,
     fd: Fd,
@@ -192,9 +193,9 @@ impl Server {
                                 }
                                 response.push_str("\r\n");
                                 response.push_str(body.as_str());
-                                let response = response.as_bytes();
+                                debug!("response: {}", response);
                                 send_fds.push(SendParams {
-                                    buf: response.to_vec(),
+                                    buf: response.into_bytes(),
                                     fd: receive.fd
                                 });
                             }
@@ -215,6 +216,7 @@ impl Server {
                             self.peers.remove(&fd.0);
                         },
                         EventType::Send(send_params) => {
+                            debug!("Wrote {} bytes", ret);
                             // TODO handle partial write
 
                         }

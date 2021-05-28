@@ -23,9 +23,11 @@ fn main() {
         .expect("Bind address is required");
 
     let mut server = Server::new(address, |_request| {
+        let body = "hello world".to_string();
         Response::builder()
             .status(StatusCode::OK)
-            .body("hello world".to_string())
+            .header("Content-Length", body.len())
+            .body(body)
             .unwrap()
     }).unwrap();
     server.run().unwrap();
