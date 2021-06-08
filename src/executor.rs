@@ -12,6 +12,7 @@ use {
     },
     // The timer we wrote in the previous section:
 };
+use log::debug;
 
 /// Task executor that receives tasks off of a channel and runs them.
 pub struct Executor {
@@ -32,6 +33,7 @@ impl Executor {
                 // `Pin<Box<dyn Future<Output = T> + Send + 'static>>`.
                 // We can get a `Pin<&mut dyn Future + Send + 'static>`
                 // from it by calling the `Pin::as_mut` method.
+                debug!("Polling future");
                 if let Poll::Pending = future.as_mut().poll(context) {
                     // We're not done processing the future, so put it
                     // back in its task to be run again in the future.
@@ -39,6 +41,7 @@ impl Executor {
                 }
             }
         }
+        debug!("Executor finished");
     }
 }
 
@@ -51,6 +54,7 @@ pub struct Spawner {
 
 impl Spawner {
     pub fn spawn(&self, future: impl Future<Output = ()> + 'static + Send) {
+        debug!("Spawning future");
         let future = future.boxed();
         let task = Arc::new(Task {
             future: Mutex::new(Some(future)),

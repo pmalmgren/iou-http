@@ -29,6 +29,8 @@ pub enum IouError {
 }
 
 type Callback = Box<dyn FnOnce(i32) + Send + 'static>;
+// TODO rename this
+pub type ReactorRegistrator = SyncSender<(Entry, Callback)>;
 
 pub struct Reactor {
     ring: IoUring,
@@ -38,7 +40,7 @@ pub struct Reactor {
 }
 
 impl Reactor {
-    pub fn new() -> Result<(Reactor, SyncSender<(Entry, Callback)>), IouError> {
+    pub fn new() -> Result<(Reactor, ReactorRegistrator), IouError> {
         let ring = IoUring::new(8)?;
         let user_data = 1u64;
         let events: HashMap<u64, Callback> = HashMap::new();
@@ -55,7 +57,9 @@ impl Reactor {
         // TODO split submission and completion queues so they're owned
         // by different threads
         loop {
+            // TODO break out of the loop when the senders disconnect
             while let Ok((mut entry, callback)) = self.receiver.try_recv() {
+                debug!("Submitting entry {} to io uring", self.user_data);
                 entry = entry.user_data(self.user_data);
                 unsafe {
                     self.ring.submission().push(&entry)?;
@@ -69,6 +73,7 @@ impl Reactor {
             for cqe in self.ring.completion() {
                 let ret = cqe.result();
                 let user_data = cqe.user_data();
+                debug!("Got completion for entry {}: {}", user_data, ret);
 
                 if let Some(callback) = self.events.remove(&user_data) {
                     (callback)(ret)
