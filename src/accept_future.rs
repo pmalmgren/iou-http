@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::{future::Future, pin::Pin};
 
-use crate::reactor::ReactorRegistrator;
+use crate::reactor::ReactorSender;
 
 type AcceptResult = Result<RawFd, Error>;
 
@@ -20,7 +20,7 @@ struct SharedState {
 
 pub struct AcceptFuture {
     submitted: bool,
-    sender: ReactorRegistrator,
+    sender: ReactorSender,
     address: Pin<Box<libc::sockaddr>>,
     state: Arc<Mutex<SharedState>>,
     socket: TcpListener,
@@ -28,7 +28,7 @@ pub struct AcceptFuture {
 }
 
 impl AcceptFuture {
-    pub fn new(sender: ReactorRegistrator, addr: &str) -> AcceptFuture {
+    pub fn new(sender: ReactorSender, addr: &str) -> AcceptFuture {
         let mut address = libc::sockaddr {
             sa_family: 0,
             sa_data: [0 as libc::c_char; 14],
@@ -71,7 +71,7 @@ impl Future for AcceptFuture {
                     .build();
             let shared_state_clone = self.state.clone();
             self.sender
-                .send((
+                .submit(
                     entry,
                     Box::new(move |n: i32| {
                         debug!("Accept result: {}", n);
@@ -84,7 +84,7 @@ impl Future for AcceptFuture {
                         let waker = shared_state.waker.take().expect("Expected waker");
                         waker.wake();
                     }),
-                ))
+                )
                 .unwrap();
             return Poll::Pending;
         }

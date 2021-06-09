@@ -14,7 +14,7 @@ use accept_future::AcceptFuture;
 fn main() {
     pretty_env_logger::init();
 
-    let (mut reactor, sender) = reactor::Reactor::new().unwrap();
+    let (mut reactor, mut sender) = reactor::Reactor::new().unwrap();
 
     thread::spawn(move || {
         reactor.run().unwrap();

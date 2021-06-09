@@ -1,10 +1,12 @@
-use io_uring::{opcode, squeue::{PushError, Entry}, types::Fd, IoUring};
+use io_uring::{opcode, squeue::{PushError, Entry}, types::Fd, IoUring, SubmissionQueue, Submitter, CompletionQueue};
 use log::{debug, error, info};
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::{io, mem, net};
 use std::sync::mpsc::{Receiver, sync_channel, SyncSender};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use httparse::{Request, EMPTY_HEADER, Error as HttpParseError};
 use http;
 
@@ -30,52 +32,71 @@ pub enum IouError {
 
 type Callback = Box<dyn FnOnce(i32) + Send + 'static>;
 // TODO rename this
-pub type ReactorRegistrator = SyncSender<(Entry, Callback)>;
 
-pub struct Reactor {
-    ring: IoUring,
-    user_data: u64,
-    events: HashMap<u64, Callback>,
-    receiver: Receiver<(Entry, Callback)>,
+// TODO switch this to an UnsafeCell instead of a Mutex
+#[derive(Clone)]
+pub struct Reactor(Arc<Mutex<ReactorInner>>);
+
+struct ReactorInner {
+    completion: CompletionQueue<'static>,
+    events: Arc<Mutex<HashMap<u64, Callback>>>,
+}
+
+#[derive(Clone)]
+pub struct ReactorSender(Arc<Mutex<ReactorSenderInner>>);
+struct ReactorSenderInner {
+    submission_queue: SubmissionQueue<'static>,
+    submitter: Submitter<'static>,
+    user_data: AtomicU64,
+    events: Arc<Mutex<HashMap<u64, Callback>>>,
+}
+
+impl ReactorSender {
+    pub fn submit(&self, mut entry: Entry, callback: Callback) -> Result<(), IouError> {
+        let inner = self.0.lock().unwrap();
+        let user_data = inner.user_data.fetch_add(1, Ordering::Relaxed);
+        debug!("Submitting entry {} to io uring", user_data);
+        entry = entry.user_data(user_data);
+        unsafe {
+            inner.submission_queue.push(&entry)?;
+        }
+        inner.events.lock().unwrap().insert(user_data, callback);
+        inner.submitter.submit()?;
+
+        Ok(())
+    }
 }
 
 impl Reactor {
-    pub fn new() -> Result<(Reactor, ReactorRegistrator), IouError> {
+    pub fn new() -> Result<(Reactor, ReactorSender), IouError> {
+        // TODO make the io uring larger
         let ring = IoUring::new(8)?;
-        let user_data = 1u64;
-        let events: HashMap<u64, Callback> = HashMap::new();
-        let (sender, receiver) = sync_channel(CHANNEL_BUFFER);
-        Ok((Reactor {
-            ring,
-            user_data,
+        let events: Arc<Mutex<HashMap<u64, Callback>>> = Arc::new(Mutex::new(HashMap::new()));
+        let (submitter, submission_queue, completion) = Arc::new(ring).split();
+
+        let reactor = Reactor(Arc::new(Mutex::new(ReactorInner {
+            completion,
+            events: events.clone(),
+        })));
+        let sender = ReactorSender(Arc::new(Mutex::new(ReactorSenderInner {
+            submission_queue,
+            submitter,
+            user_data: AtomicU64::new(0),
             events,
-            receiver
-        }, sender))
+        })));
+
+        Ok((reactor, sender))
     }
 
     pub fn run(&mut self) -> Result<(), IouError> {
-        // TODO split submission and completion queues so they're owned
-        // by different threads
+        let inner = self.0.lock().unwrap();
         loop {
-            // TODO break out of the loop when the senders disconnect
-            while let Ok((mut entry, callback)) = self.receiver.try_recv() {
-                debug!("Submitting entry {} to io uring", self.user_data);
-                entry = entry.user_data(self.user_data);
-                unsafe {
-                    self.ring.submission().push(&entry)?;
-                }
-                self.events.insert(self.user_data, callback);
-                self.user_data += 1;
-            }
-
-            self.ring.submitter().submit_and_wait(1)?;
-
-            for cqe in self.ring.completion() {
+            for cqe in inner.completion {
                 let ret = cqe.result();
                 let user_data = cqe.user_data();
                 debug!("Got completion for entry {}: {}", user_data, ret);
 
-                if let Some(callback) = self.events.remove(&user_data) {
+                if let Some(callback) = inner.events.lock().unwrap().remove(&user_data) {
                     (callback)(ret)
                 } else {
                     error!(
