@@ -1,3 +1,4 @@
+use log::debug;
 use {
     futures::{
         future::{BoxFuture, FutureExt},
@@ -5,14 +6,13 @@ use {
     },
     std::{
         future::Future,
-        sync::mpsc::{sync_channel, Receiver, SyncSender},
+        sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError},
         sync::{Arc, Mutex},
         task::{Context, Poll},
         time::Duration,
     },
     // The timer we wrote in the previous section:
 };
-use log::debug;
 
 /// Task executor that receives tasks off of a channel and runs them.
 pub struct Executor {
@@ -20,31 +20,37 @@ pub struct Executor {
 }
 
 impl Executor {
-    pub fn run(&self) {
-        while let Ok(task) = self.ready_queue.recv() {
-            // Take the future, and if it has not yet completed (is still Some),
-            // poll it in an attempt to complete it.
-            let mut future_slot = task.future.lock().unwrap();
-            if let Some(mut future) = future_slot.take() {
-                // Create a `LocalWaker` from the task itself
-                let waker = waker_ref(&task);
-                let context = &mut Context::from_waker(&*waker);
-                // `BoxFuture<T>` is a type alias for
-                // `Pin<Box<dyn Future<Output = T> + Send + 'static>>`.
-                // We can get a `Pin<&mut dyn Future + Send + 'static>`
-                // from it by calling the `Pin::as_mut` method.
-                debug!("Polling future");
-                if let Poll::Pending = future.as_mut().poll(context) {
-                    // We're not done processing the future, so put it
-                    // back in its task to be run again in the future.
-                    *future_slot = Some(future);
+    // Returns true if the executor has more work to do
+    pub fn tick(&self) -> bool {
+        loop {
+            let result = self.ready_queue.try_recv();
+            match result {
+                Ok(task) => {
+                    // Take the future, and if it has not yet completed (is still Some),
+                    // poll it in an attempt to complete it.
+                    let mut future_slot = task.future.lock().unwrap();
+                    if let Some(mut future) = future_slot.take() {
+                        // Create a `LocalWaker` from the task itself
+                        let waker = waker_ref(&task);
+                        let context = &mut Context::from_waker(&*waker);
+                        // `BoxFuture<T>` is a type alias for
+                        // `Pin<Box<dyn Future<Output = T> + Send + 'static>>`.
+                        // We can get a `Pin<&mut dyn Future + Send + 'static>`
+                        // from it by calling the `Pin::as_mut` method.
+                        debug!("Polling future");
+                        if let Poll::Pending = future.as_mut().poll(context) {
+                            // We're not done processing the future, so put it
+                            // back in its task to be run again in the future.
+                            *future_slot = Some(future);
+                        }
+                    }
                 }
+                Err(TryRecvError::Disconnected) => return false,
+                Err(TryRecvError::Empty) => return true,
             }
         }
-        debug!("Executor finished");
     }
 }
-
 
 /// `Spawner` spawns new futures onto the task channel.
 #[derive(Clone)]
@@ -90,7 +96,6 @@ impl ArcWake for Task {
             .expect("too many tasks queued");
     }
 }
-
 
 pub fn new_executor_and_spawner() -> (Executor, Spawner) {
     // Maximum number of tasks to allow queueing in the channel at once.

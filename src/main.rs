@@ -1,13 +1,13 @@
-mod server;
+mod accept_future;
 mod executor;
 mod reactor;
-mod accept_future;
+mod server;
 
 use clap::{App, Arg};
-use pretty_env_logger;
 use executor::new_executor_and_spawner;
+use pretty_env_logger;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::sync::{Mutex, Arc};
 
 use accept_future::AcceptFuture;
 
@@ -16,14 +16,7 @@ fn main() {
 
     let (mut reactor, mut sender) = reactor::Reactor::new().unwrap();
 
-    thread::spawn(move || {
-        reactor.run().unwrap();
-    });
-
-    let (executor, spawner) = new_executor_and_spawner();
-    thread::spawn(move || {
-        executor.run();
-    });
+    let (mut executor, spawner) = new_executor_and_spawner();
 
     spawner.spawn(async {
         println!("Creating accept future");
@@ -31,13 +24,11 @@ fn main() {
         println!("got result {}", result);
     });
 
-    let done: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
-    let done_clone = done.clone();
+    drop(spawner);
 
-    loop {
-        if *done.lock().unwrap() {
-            break;
-        }
+    // TODO how do we know when to finish?
+    while executor.tick() {
+        reactor.tick().unwrap();
     }
     // println!("Address: {:p}", &address);
 }

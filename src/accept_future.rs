@@ -71,7 +71,7 @@ impl Future for AcceptFuture {
                     .build();
             let shared_state_clone = self.state.clone();
             self.sender
-                .submit(
+                .send((
                     entry,
                     Box::new(move |n: i32| {
                         debug!("Accept result: {}", n);
@@ -84,7 +84,7 @@ impl Future for AcceptFuture {
                         let waker = shared_state.waker.take().expect("Expected waker");
                         waker.wake();
                     }),
-                )
+                ))
                 .unwrap();
             return Poll::Pending;
         }
