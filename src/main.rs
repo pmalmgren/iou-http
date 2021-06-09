@@ -1,33 +1,34 @@
+mod accept_future;
+mod executor;
+mod reactor;
 mod server;
 
 use clap::{App, Arg};
+use executor::new_executor_and_spawner;
 use pretty_env_logger;
-use server::Server;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
-use http::{Response, StatusCode};
+use accept_future::AcceptFuture;
 
 fn main() {
     pretty_env_logger::init();
 
-    let matches = App::new("iou-http")
-        .arg(
-            Arg::with_name("address")
-                .help("Address and port to bind to")
-                .default_value("localhost:8888")
-                .index(1)
-                .takes_value(true),
-        )
-        .get_matches();
-    let address = matches
-        .value_of("address")
-        .expect("Bind address is required");
+    let (mut reactor, mut sender) = reactor::Reactor::new().unwrap();
 
-    let mut server = Server::new(address, |_request| {
-        let body = "hello world".to_string();
-        Response::builder()
-            .status(StatusCode::OK)
-            .body(body)
-            .unwrap()
-    }).unwrap();
-    server.run().unwrap();
+    let (mut executor, spawner) = new_executor_and_spawner();
+
+    spawner.spawn(async {
+        println!("Creating accept future");
+        let result = AcceptFuture::new(sender, "0.0.0.0:8888").await.unwrap();
+        println!("got result {}", result);
+    });
+
+    drop(spawner);
+
+    // TODO how do we know when to finish?
+    while executor.tick() {
+        reactor.tick().unwrap();
+    }
+    // println!("Address: {:p}", &address);
 }

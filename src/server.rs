@@ -1,11 +1,11 @@
+use http;
+use httparse::{Error as HttpParseError, Request, EMPTY_HEADER};
 use io_uring::{opcode, squeue::PushError, types::Fd, IoUring};
 use log::{debug, error, info};
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::{io, mem, net};
-use httparse::{Request, EMPTY_HEADER, Error as HttpParseError};
-use http;
 
 use libc;
 use nix::sys::socket::{InetAddr, SockAddr};
@@ -25,7 +25,7 @@ pub enum IouError {
     #[error("IO Error: {0}")]
     Io(#[from] io::Error),
     #[error("Error parsing HTTP headers: {0}")]
-    HttpParse(#[from] HttpParseError)
+    HttpParse(#[from] HttpParseError),
 }
 
 enum EventType {
@@ -101,7 +101,7 @@ pub struct Server {
     socket: net::TcpListener,
     raw_fd: RawFd,
     peers: HashMap<i32, Peer>,
-    handler: HttpHandler
+    handler: HttpHandler,
 }
 
 fn complete_http_request(buf: &[u8]) -> bool {
@@ -191,19 +191,23 @@ impl Server {
                                 let mut has_content_length: bool = false;
                                 for (name, value) in parts.headers.iter() {
                                     if let Ok(value) = value.to_str() {
-                                        has_content_length = value.to_ascii_lowercase() == "content-length";
-                                        response.push_str(format!("{}: {}\r\n", name, value).as_str());
+                                        has_content_length =
+                                            value.to_ascii_lowercase() == "content-length";
+                                        response
+                                            .push_str(format!("{}: {}\r\n", name, value).as_str());
                                     }
                                 }
                                 if !has_content_length {
-                                    response.push_str(format!("Content-Length: {}\r\n", body.len()).as_str());
+                                    response.push_str(
+                                        format!("Content-Length: {}\r\n", body.len()).as_str(),
+                                    );
                                 }
                                 response.push_str("\r\n");
                                 response.push_str(body.as_str());
                                 debug!("response: {}", response);
                                 send_fds.push(SendParams {
                                     buf: response.into_bytes(),
-                                    fd: receive.fd
+                                    fd: receive.fd,
                                 });
                             }
 
@@ -221,11 +225,10 @@ impl Server {
                             }
                             debug!("closed socket {:?}", fd);
                             self.peers.remove(&fd.0);
-                        },
+                        }
                         EventType::Send(send_params) => {
                             debug!("Wrote {} bytes", ret);
                             // TODO handle partial write
-
                         }
                     }
                 } else {
@@ -313,18 +316,18 @@ impl Server {
     fn send(&mut self, mut send_params: SendParams) -> Result<(), IouError> {
         self.events
             .insert(self.user_data, EventType::Send(send_params));
-        
+
         let send = match self.events.get_mut(&self.user_data).unwrap() {
             EventType::Send(ref mut params) => {
                 opcode::Send::new(params.fd, params.buf.as_mut_ptr(), params.buf.len() as u32)
                     .build()
                     .user_data(self.user_data)
-            },
-            _ => panic!("unreachable code")
+            }
+            _ => panic!("unreachable code"),
         };
-        
+
         self.user_data += 1;
-        
+
         unsafe { self.ring.submission().push(&send)? }
         Ok(())
     }
