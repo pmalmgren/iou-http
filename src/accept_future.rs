@@ -1,8 +1,7 @@
-use futures::FutureExt;
-use io_uring::{opcode, squeue::Entry, types::Fd};
-use libc::sockaddr;
-use log::{debug, trace};
+use io_uring::{opcode, types::Fd};
+use log::debug;
 use std::io::Error;
+use std::mem;
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};
@@ -13,39 +12,39 @@ use crate::reactor::ReactorSender;
 
 type AcceptResult = Result<RawFd, Error>;
 
-struct SharedState {
-    result: Option<AcceptResult>,
-    waker: Option<Waker>,
+// TODO (v2, after adding in other operations): Operation state
+
+enum Lifecycle {
+    Submitted,
+    Waiting(Waker),
+    // TODO what do we do with this?
+    // Ignored,
+    Completed(i32),
 }
 
 pub struct AcceptFuture {
-    submitted: bool,
     sender: ReactorSender,
     address: Pin<Box<libc::sockaddr>>,
-    state: Arc<Mutex<SharedState>>,
+    state: Arc<Mutex<Lifecycle>>,
+    // If this is dropped, the file descriptor will be freed
     socket: TcpListener,
     raw_fd: RawFd,
 }
 
 impl AcceptFuture {
     pub fn new(sender: ReactorSender, addr: &str) -> AcceptFuture {
-        let mut address = libc::sockaddr {
+        let address = libc::sockaddr {
             sa_family: 0,
             sa_data: [0 as libc::c_char; 14],
         };
-        println!("Address: {:p}", &address);
         let socket = TcpListener::bind(addr).expect("bind");
         let raw_fd = socket.as_raw_fd();
         AcceptFuture {
-            submitted: false,
             sender,
             socket,
             raw_fd,
             address: Box::pin(address),
-            state: Arc::new(Mutex::new(SharedState {
-                result: None,
-                waker: None,
-            })),
+            state: Arc::new(Mutex::new(Lifecycle::Submitted)),
         }
     }
 }
@@ -54,46 +53,54 @@ impl Future for AcceptFuture {
     type Output = AcceptResult;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        trace!("Poll");
-        println!("Address: {:p}", &self.address);
-        // Store the most recent waker in the future
-        {
-            let mut shared_state = self.state.lock().unwrap();
-            shared_state.waker = Some(cx.waker().clone());
-        }
+        let previous_state = mem::replace(&mut *(self.state).lock().unwrap(), Lifecycle::Submitted);
+        match previous_state {
+            Lifecycle::Submitted => {
+                println!("{}", self.raw_fd);
+                // need to submit to the queue
+                *self.state.lock().unwrap() = Lifecycle::Waiting(cx.waker().clone());
 
-        if !self.submitted {
-            debug!("Submitting accept");
-            self.submitted = true;
-            let mut address_length: libc::socklen_t = std::mem::size_of::<libc::sockaddr>() as _;
-            let entry =
-                opcode::Accept::new(Fd(self.raw_fd), &mut *self.address, &mut address_length)
-                    .build();
-            let shared_state_clone = self.state.clone();
-            self.sender
-                .send((
-                    entry,
-                    Box::new(move |n: i32| {
-                        debug!("Accept result: {}", n);
-                        let mut shared_state = shared_state_clone.lock().unwrap();
-                        if n < 0 {
-                            shared_state.result = Some(Err(Error::from_raw_os_error(-n)))
-                        } else {
-                            shared_state.result = Some(Ok(n as RawFd));
-                        }
-                        let waker = shared_state.waker.take().expect("Expected waker");
-                        waker.wake();
-                    }),
-                ))
-                .unwrap();
-            return Poll::Pending;
-        }
-
-        // TODO panic if polled after finished
-        if let Some(result) = self.state.lock().unwrap().result.take() {
-            Poll::Ready(result)
-        } else {
-            Poll::Pending
+                debug!("Submitting accept");
+                let mut address_length: libc::socklen_t =
+                    std::mem::size_of::<libc::sockaddr>() as _;
+                let entry =
+                    opcode::Accept::new(Fd(self.raw_fd), &mut *self.address, &mut address_length)
+                        .build();
+                let state_clone = self.state.clone();
+                self.sender
+                    .send((
+                        entry,
+                        Box::new(move |n: i32| {
+                            debug!("Accept result: {}", n);
+                            let previous_state = mem::replace(
+                                &mut *(state_clone).lock().unwrap(),
+                                Lifecycle::Completed(n),
+                            );
+                            if let Lifecycle::Waiting(waker) = previous_state {
+                                waker.wake();
+                            }
+                        }),
+                    ))
+                    .unwrap();
+                Poll::Pending
+            }
+            Lifecycle::Waiting(waker) => {
+                if !waker.will_wake(cx.waker()) {
+                    *self.state.lock().unwrap() = Lifecycle::Waiting(cx.waker().clone());
+                }
+                Poll::Pending
+            }
+            // Lifecycle::Ignored => {
+            //     unimplemented!("ignored futures aren't implemented yet");
+            // },
+            Lifecycle::Completed(ret) => {
+                // todo, replace state with completed
+                if ret >= 0 {
+                    Poll::Ready(Ok(ret as RawFd))
+                } else {
+                    Poll::Ready(Err(Error::from_raw_os_error(-ret)))
+                }
+            }
         }
     }
 }
