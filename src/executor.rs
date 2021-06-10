@@ -15,7 +15,7 @@ use {
 };
 
 /// Task executor that receives tasks off of a channel and runs them.
-pub struct Executor {
+pub(crate) struct Executor {
     ready_queue: Receiver<Arc<Task>>,
 }
 
@@ -97,7 +97,7 @@ impl ArcWake for Task {
     }
 }
 
-pub fn new_executor_and_spawner() -> (Executor, Spawner) {
+pub(crate) fn new_executor_and_spawner() -> (Executor, Spawner) {
     // Maximum number of tasks to allow queueing in the channel at once.
     // This is just to make `sync_channel` happy, and wouldn't be present in
     // a real executor.

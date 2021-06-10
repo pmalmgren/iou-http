@@ -26,7 +26,7 @@ const AF_INET6: u16 = libc::AF_INET6 as u16;
 const BUF_SIZE: usize = 512;
 const CHANNEL_BUFFER: usize = 10;
 
-pub type ReactorSender = SyncSender<(Entry, Callback)>;
+pub(crate) type ReactorSender = SyncSender<(Entry, Callback)>;
 
 #[derive(Error, Debug)]
 pub enum IouError {
@@ -38,11 +38,11 @@ pub enum IouError {
     Io(#[from] io::Error),
 }
 
-type Callback = Box<dyn FnOnce(i32) + Send + 'static>;
+pub(crate) type Callback = Box<dyn FnOnce(i32) + Send + 'static>;
 // TODO rename this
 
 // TODO switch this to an UnsafeCell instead of a Mutex
-pub struct Reactor(Rc<RefCell<Inner>>);
+pub(crate) struct Reactor(Rc<RefCell<Inner>>);
 
 struct Inner {
     iouring: IoUring,
