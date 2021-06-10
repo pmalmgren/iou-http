@@ -6,7 +6,7 @@ use io_uring::{
     types::Fd,
     CompletionQueue, IoUring, SubmissionQueue, Submitter,
 };
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
@@ -84,7 +84,14 @@ impl Reactor {
             inner.iouring.submit()?;
         }
 
-        // inner.iouring.submit_and_wait(1);
+        trace!("Reactor has {} events in flight", inner.events.len());
+
+        // If there is at least one entry that's been submitted to io-uring
+        // block this thread until there's a completion queue event
+        // (events is how we track requests that are in-flight)
+        if !inner.events.is_empty() {
+            inner.iouring.submit_and_wait(1)?;
+        }
 
         inner.iouring.completion().sync();
 
