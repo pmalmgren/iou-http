@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::{future::Future, pin::Pin};
 
-use crate::reactor::ReactorSender;
+use crate::runtime::register;
 
 type AcceptResult = Result<RawFd, Error>;
 
@@ -23,7 +23,6 @@ enum Lifecycle {
 }
 
 pub struct AcceptFuture {
-    sender: ReactorSender,
     address: Pin<Box<libc::sockaddr>>,
     state: Arc<Mutex<Lifecycle>>,
     // If this is dropped, the file descriptor will be freed
@@ -32,7 +31,7 @@ pub struct AcceptFuture {
 }
 
 impl AcceptFuture {
-    pub fn new(sender: ReactorSender, addr: &str) -> AcceptFuture {
+    pub fn new(addr: &str) -> AcceptFuture {
         let address = libc::sockaddr {
             sa_family: 0,
             sa_data: [0 as libc::c_char; 14],
@@ -40,7 +39,6 @@ impl AcceptFuture {
         let socket = TcpListener::bind(addr).expect("bind");
         let raw_fd = socket.as_raw_fd();
         AcceptFuture {
-            sender,
             socket,
             raw_fd,
             address: Box::pin(address),
@@ -67,21 +65,19 @@ impl Future for AcceptFuture {
                     opcode::Accept::new(Fd(self.raw_fd), &mut *self.address, &mut address_length)
                         .build();
                 let state_clone = self.state.clone();
-                self.sender
-                    .send((
-                        entry,
-                        Box::new(move |n: i32| {
-                            debug!("Accept result: {}", n);
-                            let previous_state = mem::replace(
-                                &mut *(state_clone).lock().unwrap(),
-                                Lifecycle::Completed(n),
-                            );
-                            if let Lifecycle::Waiting(waker) = previous_state {
-                                waker.wake();
-                            }
-                        }),
-                    ))
-                    .unwrap();
+                register(
+                    entry,
+                    Box::new(move |n: i32| {
+                        debug!("Accept result: {}", n);
+                        let previous_state = mem::replace(
+                            &mut *(state_clone).lock().unwrap(),
+                            Lifecycle::Completed(n),
+                        );
+                        if let Lifecycle::Waiting(waker) = previous_state {
+                            waker.wake();
+                        }
+                    }),
+                );
                 Poll::Pending
             }
             Lifecycle::Waiting(waker) => {
