@@ -30,10 +30,7 @@ pub(crate) fn register(entry: Entry, callback: Callback) {
 pub struct Runtime {
 	executor: Executor,
 	reactor: Reactor,
-	// TODO do these need to be stored on the Runtime?
-	// will the executor exit properly if they're not?
 	spawner: Option<Spawner>,
-	reactor_sender: ReactorSender,
 }
 
 impl Runtime {
@@ -51,7 +48,6 @@ impl Runtime {
 		Runtime {
 			reactor,
 			executor,
-			reactor_sender,
 			spawner: Some(spawner)
 		}
 	}
@@ -59,11 +55,18 @@ impl Runtime {
 	pub fn run(&mut self) {
 		// Drop the spawner so that the executor exits when there are no more
 		// references to the spawner
-		self.spawner.take();
+		drop(self.spawner.take());
 
-		while self.executor.tick() {
+		let mut processing = true;
+		while processing {
 			trace!("tick");
-			self.reactor.tick().unwrap();
+			// Check whether the executor or reactor did anything on this tick
+			// If either one had work, that means we might still be going
+			// but if neither did anything, that means there are no pending futures
+			// and no IO tasks in flight so we should exit.
+			let executor_processing = self.executor.tick();
+			let reactor_processing = self.reactor.tick().unwrap();
+			processing = executor_processing || reactor_processing;
 		}
 	}
 

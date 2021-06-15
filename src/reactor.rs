@@ -68,7 +68,7 @@ impl Reactor {
         Ok((reactor, tx))
     }
 
-    pub fn tick(&mut self) -> Result<(), IouError> {
+    pub fn tick(&mut self) -> Result<bool, IouError> {
         let mut inner = self.0.borrow_mut();
         // TODO do we need to manually drop these?
 
@@ -127,6 +127,6 @@ impl Reactor {
             }
         }
 
-        Ok(())
+        Ok(inner.events.len() > 0)
     }
 }
