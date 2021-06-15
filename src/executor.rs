@@ -105,3 +105,34 @@ pub(crate) fn new_executor_and_spawner() -> (Executor, Spawner) {
     let (task_sender, ready_queue) = sync_channel(MAX_QUEUED_TASKS);
     (Executor { ready_queue }, Spawner { task_sender })
 }
+
+/*
+   Finished dev [unoptimized + debuginfo] target(s) in 0.04s
+     Running `target/debug/iou-httpserver`
+ DEBUG iou_httpserver::executor > Spawning future
+ DEBUG iou_httpserver::executor > Spawning future
+ DEBUG iou_httpserver::executor > Polling future
+Creating accept future
+4
+ DEBUG iou_httpserver::accept_future > Submitting accept
+ DEBUG iou_httpserver::executor      > Polling future
+5
+ DEBUG iou_httpserver::accept_future > Submitting accept
+ TRACE iou_httpserver::runtime       > tick
+ DEBUG iou_httpserver::reactor       > Submitting entry 0 to io uring
+ DEBUG iou_httpserver::reactor       > Submitting entry 1 to io uring
+ TRACE iou_httpserver::reactor       > Reactor has 2 events in flight
+ DEBUG iou_httpserver::reactor       > Consumed 1 entries in 1 tick
+ DEBUG iou_httpserver::reactor       > Got completion for entry 0: 6
+ DEBUG iou_httpserver::accept_future > Accept result: 6
+ DEBUG iou_httpserver::executor      > Polling future
+got result 6
+ TRACE iou_httpserver::runtime       > tick
+ TRACE iou_httpserver::reactor       > Reactor has 1 events in flight
+ DEBUG iou_httpserver::reactor       > Consumed 1 entries in 1 tick
+ DEBUG iou_httpserver::reactor       > Got completion for entry 1: -22
+ DEBUG iou_httpserver::accept_future > Accept result: -22
+ DEBUG iou_httpserver::executor      > Polling future
+thread 'main' panicked at 'called `Result::unwrap()` on an `Err` value: Os { code: 22, kind: InvalidInput, message: "Invalid argument" }', src/main.rs:23:63
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+*/

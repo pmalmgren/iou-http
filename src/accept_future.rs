@@ -24,6 +24,7 @@ enum Lifecycle {
 
 pub struct AcceptFuture {
     address: Pin<Box<libc::sockaddr>>,
+    address_length: Pin<Box<libc::socklen_t>>,
     state: Arc<Mutex<Lifecycle>>,
     // If this is dropped, the file descriptor will be freed
     socket: TcpListener,
@@ -36,12 +37,15 @@ impl AcceptFuture {
             sa_family: 0,
             sa_data: [0 as libc::c_char; 14],
         };
+        let address_length: libc::socklen_t =
+            std::mem::size_of::<libc::sockaddr>() as _;
         let socket = TcpListener::bind(addr).expect("bind");
         let raw_fd = socket.as_raw_fd();
         AcceptFuture {
             socket,
             raw_fd,
             address: Box::pin(address),
+            address_length: Box::pin(address_length),
             state: Arc::new(Mutex::new(Lifecycle::Submitted)),
         }
     }
@@ -59,10 +63,8 @@ impl Future for AcceptFuture {
                 *self.state.lock().unwrap() = Lifecycle::Waiting(cx.waker().clone());
 
                 debug!("Submitting accept");
-                let mut address_length: libc::socklen_t =
-                    std::mem::size_of::<libc::sockaddr>() as _;
                 let entry =
-                    opcode::Accept::new(Fd(self.raw_fd), &mut *self.address, &mut address_length)
+                    opcode::Accept::new(Fd(self.raw_fd), &mut *self.address, &mut *self.address_length)
                         .build();
                 let state_clone = self.state.clone();
                 register(
