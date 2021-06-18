@@ -1,44 +1,50 @@
+
 use io_uring::{opcode, types::Fd};
 use log::debug;
 use std::io::Error;
-use std::marker::PhantomData;
 use std::mem;
-use std::net::{TcpListener, TcpStream};
-use std::os::unix::io::{AsRawFd, RawFd, FromRawFd};
+use std::net::TcpStream;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::{future::Future, pin::Pin};
+use std::convert::TryInto;
+use libc;
+use std::marker::PhantomData;
+use bytes::BytesMut;
 
 use crate::runtime::register;
 
+type RecvResult = Result<usize, Error>;
+
 use crate::lifecycle::Lifecycle;
 
-type AcceptResult = Result<TcpStream, Error>;
-
-// TODO (v2, after adding in other operations): Operation state
-
-pub struct AcceptFuture<'a> {
-    state: Arc<Mutex<Lifecycle>>,
-    // If this is dropped, the file descriptor will be freed
+pub struct RecvFuture<'a> {
+    stream: PhantomData<&'a TcpStream>,
     raw_fd: RawFd,
-    socket: PhantomData<&'a TcpListener>
+	// TODO use a more efficient way to store this
+    buf: BytesMut,
+	state: Arc<Mutex<Lifecycle>>,
 }
 
-impl<'a> AcceptFuture<'a> {
-    // TODO does this lifetime need to be static?
-    pub fn new(socket: &'a TcpListener) -> AcceptFuture<'a> {
-        AcceptFuture {
-            raw_fd: socket.as_raw_fd(),
-            state: Arc::new(Mutex::new(Lifecycle::Submitted)),
-            socket: PhantomData
+impl<'a> RecvFuture<'a> {
+    pub fn new(buf: BytesMut, stream: &'a mut TcpStream) -> RecvFuture<'a> {
+        let raw_fd = stream.as_raw_fd();
+        RecvFuture {
+            stream: PhantomData,
+            raw_fd,
+            buf,
+            state: Arc::new(Mutex::new(Lifecycle::Submitted))
         }
     }
 }
 
-impl<'a> Future for AcceptFuture<'a> {
-    type Output = AcceptResult;
+// https://docs.rs/bytes/1.0.1/bytes/
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+impl<'a> Future for RecvFuture<'a> {
+    type Output = RecvResult;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let previous_state = mem::replace(&mut *(self.state).lock().unwrap(), Lifecycle::Submitted);
         match previous_state {
             Lifecycle::Submitted => {
@@ -46,15 +52,19 @@ impl<'a> Future for AcceptFuture<'a> {
                 // need to submit to the queue
                 *self.state.lock().unwrap() = Lifecycle::Waiting(cx.waker().clone());
 
-                debug!("Submitting accept");
+                debug!("Submitting Recv (buf capacity: {})", self.buf.capacity());
                 let entry =
-                    opcode::Accept::new(Fd(self.raw_fd), std::ptr::null_mut(), std::ptr::null_mut())
+                    opcode::Recv::new(Fd(self.raw_fd), self.buf.as_mut_ptr(), self.buf.capacity() as u32)
+                        /*
+						// TODO change this flag to not wait until socket is closed (probably)
+                        .flags(libc::MSG_WAITALL)
+                        */
                         .build();
                 let state_clone = self.state.clone();
                 register(
                     entry,
                     Box::new(move |n: i32| {
-                        debug!("Accept result: {}", n);
+                        debug!("Recv result: {}", n);
                         let previous_state = mem::replace(
                             &mut *(state_clone).lock().unwrap(),
                             Lifecycle::Completed(n),
@@ -78,10 +88,7 @@ impl<'a> Future for AcceptFuture<'a> {
             Lifecycle::Completed(ret) => {
                 // todo, replace state with completed
                 if ret >= 0 {
-                    let stream = unsafe {
-                        TcpStream::from_raw_fd(ret as RawFd)
-                    };
-                    Poll::Ready(Ok(stream))
+                    Poll::Ready(Ok(ret.try_into().unwrap()))
                 } else {
                     Poll::Ready(Err(Error::from_raw_os_error(-ret)))
                 }
