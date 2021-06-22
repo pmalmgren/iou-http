@@ -236,7 +236,6 @@ dependencies = [
 name = "iou-httpserver"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "clap",
  "futures",
  "http",

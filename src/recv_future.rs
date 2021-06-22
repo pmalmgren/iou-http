@@ -9,9 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::{future::Future, pin::Pin};
 use std::convert::TryInto;
-use libc;
 use std::marker::PhantomData;
-use bytes::BytesMut;
 
 use crate::runtime::register;
 
@@ -23,18 +21,36 @@ pub struct RecvFuture<'a> {
     stream: PhantomData<&'a TcpStream>,
     raw_fd: RawFd,
 	// TODO use a more efficient way to store this
-    buf: BytesMut,
 	state: Arc<Mutex<Lifecycle>>,
 }
 
 impl<'a> RecvFuture<'a> {
-    pub fn new(buf: BytesMut, stream: &'a mut TcpStream) -> RecvFuture<'a> {
+    // TODO should this buffer be pinned? (because we're giving the pointer to io-uring)
+    pub fn submit(buf: &'a mut [u8], stream: &'a mut TcpStream) -> RecvFuture<'a> {
         let raw_fd = stream.as_raw_fd();
+        let state = Arc::new(Mutex::new(Lifecycle::Submitted));
+        // TODO how do we figure out the length?
+        debug!("Submitting Recv (buf length: {})", buf.len());
+        let entry =
+            opcode::Recv::new(Fd(raw_fd), buf.as_mut_ptr(), buf.len() as u32)
+            .build();
+        let state_clone = state.clone();
+        register(
+            entry,
+            Box::new(move |n: i32| {
+                debug!("Recv result: {}", n);
+                let previous_state = mem::replace(
+                    &mut *(state_clone).lock().unwrap(),
+                    Lifecycle::Completed(n),
+                );
+                if let Lifecycle::Waiting(waker) = previous_state {
+                    waker.wake();
+                }
+            }));
         RecvFuture {
             stream: PhantomData,
             raw_fd,
-            buf,
-            state: Arc::new(Mutex::new(Lifecycle::Submitted))
+            state,
         }
     }
 }
@@ -49,31 +65,7 @@ impl<'a> Future for RecvFuture<'a> {
         match previous_state {
             Lifecycle::Submitted => {
                 println!("{}", self.raw_fd);
-                // need to submit to the queue
                 *self.state.lock().unwrap() = Lifecycle::Waiting(cx.waker().clone());
-
-                debug!("Submitting Recv (buf capacity: {})", self.buf.capacity());
-                let entry =
-                    opcode::Recv::new(Fd(self.raw_fd), self.buf.as_mut_ptr(), self.buf.capacity() as u32)
-                        /*
-						// TODO change this flag to not wait until socket is closed (probably)
-                        .flags(libc::MSG_WAITALL)
-                        */
-                        .build();
-                let state_clone = self.state.clone();
-                register(
-                    entry,
-                    Box::new(move |n: i32| {
-                        debug!("Recv result: {}", n);
-                        let previous_state = mem::replace(
-                            &mut *(state_clone).lock().unwrap(),
-                            Lifecycle::Completed(n),
-                        );
-                        if let Lifecycle::Waiting(waker) = previous_state {
-                            waker.wake();
-                        }
-                    }),
-                );
                 Poll::Pending
             }
             Lifecycle::Waiting(waker) => {
