@@ -1,13 +1,11 @@
-
 use io_uring::{opcode, types::Fd};
 use std::mem;
 use std::net::TcpStream;
-use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, Mutex};
 use std::marker::PhantomData;
+use std::os::unix::io::AsRawFd;
 
 use crate::syscall::{SysCall, Lifecycle};
-
 pub struct RecvFuture<'a> {
     stream: PhantomData<&'a TcpStream>,
 }
@@ -24,4 +22,3 @@ impl<'a> RecvFuture<'a> {
         SysCall::from_entry(entry, future)
     }
 }
-
