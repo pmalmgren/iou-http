@@ -14,14 +14,12 @@ fn main() {
     pretty_env_logger::init();
     let mut runtime = Runtime::new();
 
-    let handler = |_request: Request, _body: Option<&[u8]>| -> Response<String> {
+    let handler = |_request: Request, _body: Option<&[u8]>| async {
         Response::builder()
             .status(StatusCode::OK)
-            .body("hello world".to_string())
+            .body("hello world".as_bytes().to_vec())
             .unwrap()
     };
     let server = HttpServer::bind("0.0.0.0:8889").expect("bind");
-    runtime.block_on(
-        server.serve(handler)
-    );
+    runtime.block_on(server.serve(handler));
 }

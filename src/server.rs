@@ -1,5 +1,6 @@
 use crate::runtime::spawn;
 use crate::syscall::{Accept, Close, Recv, Send};
+use futures::future::Future;
 use http::Response;
 use httparse::{Request, Status, EMPTY_HEADER};
 use log::{error, trace};
@@ -9,7 +10,7 @@ use std::os::unix::io::FromRawFd;
 use std::str;
 use std::sync::Arc;
 
-fn serialize_response(response: http::Response<String>) -> Vec<u8> {
+fn serialize_response(response: http::Response<Vec<u8>>) -> Vec<u8> {
     let (parts, body) = response.into_parts();
     // TODO serialize the HTTP response with less copying
     let mut response = format!("HTTP/1.1 {}\r\n", parts.status);
@@ -24,9 +25,11 @@ fn serialize_response(response: http::Response<String>) -> Vec<u8> {
         response.push_str(format!("Content-Length: {}\r\n", body.len()).as_str());
     }
     response.push_str("\r\n");
-    response.push_str(body.as_str());
 
-    response.into_bytes()
+    let mut response = response.into_bytes();
+    response.extend_from_slice(&body);
+
+    response
 }
 
 const BUF_SIZE: usize = 512;
@@ -41,9 +44,10 @@ impl HttpServer {
         Ok(HttpServer { socket })
     }
 
-    pub async fn serve<H>(self, handler: H)
+    pub async fn serve<H, R>(self, handler: H)
     where
-        H: (Fn(Request, Option<&[u8]>) -> Response<String>) + 'static + std::marker::Send + Sync,
+        H: (Fn(Request, Option<&[u8]>) -> R) + 'static + std::marker::Send + Sync,
+        R: Future<Output = Response<Vec<u8>>> + std::marker::Send
     {
         // Handler is wrapped in an Arc so it can be cloned each time a task is spawned
         let handler = Arc::new(handler);
@@ -114,7 +118,7 @@ impl HttpServer {
                             };
 
                             // TODO pass http::Request to handler instead of httparse::Request
-                            let response = (handler_clone)(request, body);
+                            let response = (handler_clone)(request, body).await;
                             let mut response_buf = serialize_response(response);
                             Send::submit(&mut response_buf, &mut stream).await.unwrap();
                             break;
@@ -127,7 +131,7 @@ impl HttpServer {
                             error!("Invalid HTTP request: {:?}", err);
                             let response = Response::builder()
                                 .status(400)
-                                .body("Invalid HTTP Request".to_string())
+                                .body("Invalid HTTP Request".as_bytes().to_vec())
                                 .unwrap();
                             Send::submit(&mut serialize_response(response), &mut stream)
                                 .await
