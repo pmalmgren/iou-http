@@ -66,6 +66,7 @@ impl HttpServer {
 
         // Accept loop
         loop {
+            // TODO have more than 1 accept call in flight
             let fd = Accept::submit(&self.socket).await.unwrap();
             let mut stream = unsafe { TcpStream::from_raw_fd(fd as i32) };
 

@@ -9,7 +9,6 @@ use {
         sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError},
         sync::{Arc, Mutex},
         task::{Context, Poll},
-        time::Duration,
     },
     // The timer we wrote in the previous section:
 };
