@@ -1,14 +1,16 @@
 use crate::runtime::spawn;
 use crate::syscall::{Accept, Close, Recv, Send};
 use futures::future::Future;
-use http::Response;
-use httparse::{Request, Status, EMPTY_HEADER};
+use http::{Request, Response, Version};
+use httparse::{Request as ParseRequest, Status, EMPTY_HEADER};
 use log::{error, trace};
 use std::io::Error;
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::io::FromRawFd;
 use std::str;
 use std::sync::Arc;
+
+const BUF_SIZE: usize = 512;
 
 fn serialize_response(response: http::Response<Vec<u8>>) -> Vec<u8> {
     let (parts, body) = response.into_parts();
@@ -32,7 +34,17 @@ fn serialize_response(response: http::Response<Vec<u8>>) -> Vec<u8> {
     response
 }
 
-const BUF_SIZE: usize = 512;
+fn convert_http_request(request: ParseRequest, body: Vec<u8>) -> Request<Vec<u8>> {
+    let builder = Request::builder()
+        .method(request.method.unwrap())
+        .uri(request.path.unwrap())
+        .version(Version::HTTP_11);
+    let builder =
+        request.headers.iter().fold(builder, |builder, header| {
+            builder.header(header.name, header.value)
+        });
+    builder.body(body).unwrap()
+}
 
 pub struct HttpServer {
     socket: TcpListener,
@@ -46,8 +58,8 @@ impl HttpServer {
 
     pub async fn serve<H, R>(self, handler: H)
     where
-        H: (Fn(Request, Option<&[u8]>) -> R) + 'static + std::marker::Send + Sync,
-        R: Future<Output = Response<Vec<u8>>> + std::marker::Send
+        H: (Fn(Request<Vec<u8>>) -> R) + 'static + std::marker::Send + Sync,
+        R: Future<Output = Response<Vec<u8>>> + std::marker::Send,
     {
         // Handler is wrapped in an Arc so it can be cloned each time a task is spawned
         let handler = Arc::new(handler);
@@ -82,7 +94,7 @@ impl HttpServer {
                     }
 
                     let mut headers = [EMPTY_HEADER; 24];
-                    let mut request = Request::new(&mut headers);
+                    let mut request = ParseRequest::new(&mut headers);
 
                     // If we've gotten a complete request, call the handler with it
                     // and return the response. If not, call recv again
@@ -117,8 +129,8 @@ impl HttpServer {
                                 }
                             };
 
-                            // TODO pass http::Request to handler instead of httparse::Request
-                            let response = (handler_clone)(request, body).await;
+                            let request = convert_http_request(request, body.unwrap_or(&[]).to_vec());
+                            let response = (handler_clone)(request).await;
                             let mut response_buf = serialize_response(response);
                             Send::submit(&mut response_buf, &mut stream).await.unwrap();
                             break;
