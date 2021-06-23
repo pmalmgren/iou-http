@@ -6,17 +6,17 @@ use std::marker::PhantomData;
 use std::os::unix::io::AsRawFd;
 
 use crate::syscall::{SysCall, Lifecycle};
-pub struct RecvFuture<'a> {
+pub struct Recv<'a> {
     stream: PhantomData<&'a TcpStream>,
 }
 
-impl<'a> RecvFuture<'a> {
-    pub fn submit(buf: &'a mut [u8], stream: &'a mut TcpStream) -> SysCall<RecvFuture<'a>> {
+impl<'a> Recv<'a> {
+    pub fn submit(buf: &'a mut [u8], stream: &'a mut TcpStream) -> SysCall<Recv<'a>> {
         let raw_fd = stream.as_raw_fd();
         let entry =
             opcode::Recv::new(Fd(raw_fd), buf.as_mut_ptr(), buf.len() as u32)
             .build();
-        let future = RecvFuture {
+        let future = Recv {
             stream: PhantomData
         };
         SysCall::from_entry(entry, future)
