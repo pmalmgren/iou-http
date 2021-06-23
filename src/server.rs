@@ -34,7 +34,7 @@ fn serialize_response(response: http::Response<Vec<u8>>) -> Vec<u8> {
     response
 }
 
-fn convert_http_request(request: ParseRequest, body: Vec<u8>) -> Request<Vec<u8>> {
+fn convert_http_request<T>(request: ParseRequest, body: T) -> Request<T> {
     let builder = Request::builder()
         .method(request.method.unwrap())
         .uri(request.path.unwrap())
@@ -58,7 +58,7 @@ impl HttpServer {
 
     pub async fn serve<H, R>(self, handler: H)
     where
-        H: (Fn(Request<Vec<u8>>) -> R) + 'static + std::marker::Send + Sync,
+        H: (Fn(Request<&[u8]>) -> R) + 'static + std::marker::Send + Sync,
         R: Future<Output = Response<Vec<u8>>> + std::marker::Send,
     {
         // Handler is wrapped in an Arc so it can be cloned each time a task is spawned
@@ -93,6 +93,7 @@ impl HttpServer {
                         break;
                     }
 
+                    // TODO what if there are more than this number of headers?
                     let mut headers = [EMPTY_HEADER; 24];
                     let mut request = ParseRequest::new(&mut headers);
 
@@ -129,7 +130,7 @@ impl HttpServer {
                                 }
                             };
 
-                            let request = convert_http_request(request, body.unwrap_or(&[]).to_vec());
+                            let request = convert_http_request(request, body.unwrap_or(&[]));
                             let response = (handler_clone)(request).await;
                             let mut response_buf = serialize_response(response);
                             Send::submit(&mut response_buf, &mut stream).await.unwrap();

@@ -13,7 +13,7 @@ fn main() {
     pretty_env_logger::init();
     let mut runtime = Runtime::new();
 
-    let handler = |_request: Request<Vec<u8>>| async {
+    let handler = |_request: Request<&[u8]>| async {
         Response::builder()
             .status(StatusCode::OK)
             .body("hello world".as_bytes().to_vec())
