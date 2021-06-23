@@ -1,37 +1,21 @@
-use http;
-use httparse::{Error as HttpParseError, Request, EMPTY_HEADER};
 use io_uring::{
-    opcode,
     squeue::{Entry, PushError},
-    types::Fd,
-    CompletionQueue, IoUring, SubmissionQueue, Submitter,
+    IoUring
 };
-use log::{debug, error, info, trace};
+use log::{debug, error, trace};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::net::ToSocketAddrs;
-use std::os::unix::io::{AsRawFd, RawFd};
 use std::rc::Rc;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
-use std::{io, mem, net};
+use std::io;
 
-use libc;
-use nix::sys::socket::{InetAddr, SockAddr};
 use thiserror::Error;
 // https://github.com/dtolnay/thiserror
-
-const AF_INET: u16 = libc::AF_INET as u16;
-const AF_INET6: u16 = libc::AF_INET6 as u16;
-const BUF_SIZE: usize = 512;
-const CHANNEL_BUFFER: usize = 10;
 
 pub(crate) type ReactorSender = SyncSender<(Entry, Callback)>;
 
 #[derive(Error, Debug)]
 pub enum IouError {
-    #[error("Got invalid address family {0}")]
-    InvalidAddressFamily(u16),
     #[error("Error submitting event to submission queue {0}")]
     Push(#[from] PushError),
     #[error("IO Error: {0}")]
