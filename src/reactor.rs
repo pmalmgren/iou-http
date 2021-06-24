@@ -1,13 +1,13 @@
 use io_uring::{
     squeue::{Entry, PushError},
-    IoUring
+    IoUring,
 };
-use log::{debug, error, trace};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io;
 use std::rc::Rc;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::io;
+use tracing::{debug, error, trace};
 
 use thiserror::Error;
 // https://github.com/dtolnay/thiserror
@@ -58,7 +58,7 @@ impl Reactor {
 
         while let Ok((mut entry, callback)) = inner.receiver.try_recv() {
             let user_data = inner.user_data;
-            debug!("Submitting entry {} to io uring", user_data);
+            trace!("submitting entry {} to io uring", user_data);
             entry = entry.user_data(user_data);
             unsafe {
                 inner.iouring.submission().push(&entry)?;
@@ -68,7 +68,7 @@ impl Reactor {
             inner.iouring.submit()?;
         }
 
-        trace!("Reactor has {} events in flight", inner.events.len());
+        trace!("reactor has {} events in flight", inner.events.len());
 
         // If there is at least one entry that's been submitted to io-uring
         // block this thread until there's a completion queue event
@@ -86,7 +86,7 @@ impl Reactor {
                 let user_data = cqe.user_data();
 
                 if user_data == u64::MAX {
-                    debug!("Skipped cancelled completion entry.");
+                    debug!("skipped cancelled completion entry.");
                     return None;
                 }
 
@@ -95,11 +95,11 @@ impl Reactor {
             .collect();
 
         if completed_entries.len() > 0 {
-            debug!("Consumed {} entries in 1 tick", completed_entries.len());
+            trace!("consumed {} entries in 1 tick", completed_entries.len());
         }
 
         for (user_data, ret) in completed_entries {
-            debug!("Got completion for entry {}: {}", user_data, ret);
+            trace!("got completion for entry {}: {}", user_data, ret);
 
             if let Some(callback) = inner.events.remove(&user_data) {
                 (callback)(ret)
