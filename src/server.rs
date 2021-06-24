@@ -1,6 +1,6 @@
 use crate::runtime::{spawn, Runtime};
 use crate::syscall::{Accept, Close, Recv, Send};
-use futures::future::Future;
+use futures::{channel::mpsc::unbounded, future::Future, SinkExt, StreamExt};
 use http::{Request, Response, Version};
 use httparse::{Request as ParseRequest, Status, EMPTY_HEADER};
 use log::{debug, error, trace};
@@ -8,10 +8,7 @@ use std::io::Error;
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::io::FromRawFd;
 use std::str;
-use std::sync::{
-    mpsc::{channel, TryRecvError},
-    Arc,
-};
+use std::sync::Arc;
 use std::thread::spawn as spawn_thread;
 
 const BUF_SIZE: usize = 512;
@@ -94,47 +91,21 @@ impl HttpServer {
         // Spawn worker threads
         for worker in 0..num_workers {
             let handler = handler.clone();
-            let (sender, receiver) = channel::<TcpStream>();
+            let (sender, mut receiver) = unbounded::<TcpStream>();
             channels.push(sender);
 
+            // TODO should we do something with the JoinHandle returned by this spawn call?
             spawn_thread(move || {
                 let mut runtime = Runtime::new();
-
-                // The thread should shutdown when the channel
-                // from the main thread is closed
-                let mut should_shutdown = false;
-                let mut processing = false;
-                while !should_shutdown {
-                    // Only block waiting for new streams on the channel
-                    // if the runtime isn't already working on processing some streams
-                    let stream = if processing {
-                        match receiver.try_recv() {
-                            Ok(stream) => Some(stream),
-                            Err(TryRecvError::Disconnected) => {
-                                trace!("worker {} channel disconnected while waiting for stream (non-blocking)", worker);
-                                should_shutdown = true;
-                                None
-                            }
-                            Err(TryRecvError::Empty) => None,
-                        }
-                    } else {
-                        match receiver.recv() {
-                            Ok(stream) => Some(stream),
-                            Err(_err) => {
-                                trace!("worker {} channel disconnected while waiting for stream (blocking)", worker);
-                                should_shutdown = true;
-                                None
-                            }
-                        }
-                    };
-
-                    if let Some(stream) = stream {
-                        trace!("worker {} got a new stream", worker);
-                        runtime.spawn(HttpServer::handle_http_requests(stream, handler.clone()));
+                runtime.block_on(async move {
+                    // The thread should shutdown when the channel
+                    // from the main thread is closed
+                    while let Some(stream) = receiver.next().await {
+                        trace!("worker {} got stream", worker);
+                        spawn(HttpServer::handle_http_requests(stream, handler.clone()));
                     }
-
-                    processing = runtime.tick();
-                }
+                });
+                let _runtime = runtime;
                 trace!("worker {} shutting down", worker);
             });
         }
@@ -153,7 +124,10 @@ impl HttpServer {
 
                 // Send streams to workers in round-robin fashion
                 // TODO determine which workers are busy before sending
-                channels[next_worker].send(stream).unwrap();
+                channels[next_worker]
+                    .send(stream)
+                    .await
+                    .expect(&format!("error sending stream to worker {}", next_worker));
                 next_worker = (next_worker + 1) % num_workers;
             }
         });
