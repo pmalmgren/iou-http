@@ -1,10 +1,10 @@
 use crate::executor::{new_executor_and_spawner, Executor, Spawner};
 use crate::reactor::{Callback, Reactor, ReactorSender};
 use io_uring::squeue::Entry;
-use log::trace;
 use std::cell::RefCell;
 use std::future::Future;
 use std::thread_local;
+use tracing::trace;
 
 // TODO should this be scoped thread local storage?
 thread_local!(static RUNTIME: RefCell<Option<(Spawner, ReactorSender)>> = RefCell::new(None));

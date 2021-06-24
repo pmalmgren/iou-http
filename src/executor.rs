@@ -1,4 +1,4 @@
-use log::debug;
+use tracing::trace;
 use {
     futures::{
         future::{BoxFuture, FutureExt},
@@ -38,16 +38,29 @@ impl Executor {
                         // `Pin<Box<dyn Future<Output = T> + Send + 'static>>`.
                         // We can get a `Pin<&mut dyn Future + Send + 'static>`
                         // from it by calling the `Pin::as_mut` method.
-                        debug!("Polling future");
+                        trace!("polling future");
                         if let Poll::Pending = future.as_mut().poll(context) {
                             // We're not done processing the future, so put it
                             // back in its task to be run again in the future.
                             *future_slot = Some(future);
+                            trace!("future is still pending");
+                        } else {
+                            trace!("future finished");
                         }
                     }
                 }
-                Err(TryRecvError::Disconnected) => return false,
-                Err(TryRecvError::Empty) => return processed_events,
+                Err(TryRecvError::Disconnected) => {
+                    trace!("channel has no more connected senders");
+                    return false;
+                }
+                Err(TryRecvError::Empty) => {
+                    if processed_events {
+                        trace!("executor polled futures");
+                    } else {
+                        trace!("executor did not poll any futures");
+                    }
+                    return processed_events;
+                }
             }
         }
     }
@@ -61,13 +74,15 @@ pub struct Spawner {
 
 impl Spawner {
     pub fn spawn(&self, future: impl Future<Output = ()> + 'static + Send) {
-        debug!("Spawning future");
+        trace!("spawning future");
         let future = future.boxed();
         let task = Arc::new(Task {
             future: Mutex::new(Some(future)),
             task_sender: self.task_sender.clone(),
         });
-        self.task_sender.send(task).expect("too many tasks queued");
+        self.task_sender
+            .send(task)
+            .expect("cannot spawn future because there is no receiver on the channel");
     }
 }
 
@@ -91,10 +106,11 @@ impl ArcWake for Task {
         // Implement `wake` by sending this task back onto the task channel
         // so that it will be polled again by the executor.
         let cloned = arc_self.clone();
+        trace!("waking task");
         arc_self
             .task_sender
             .send(cloned)
-            .expect("too many tasks queued");
+            .expect("cannot wake task because there is no receiver on the channel");
     }
 }
 

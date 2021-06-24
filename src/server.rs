@@ -3,13 +3,13 @@ use crate::syscall::{Accept, Close, Recv, Send};
 use futures::{channel::mpsc::unbounded, future::Future, SinkExt, StreamExt};
 use http::{Request, Response, Version};
 use httparse::{Request as ParseRequest, Status, EMPTY_HEADER};
-use log::{debug, error, trace};
 use std::io::Error;
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::io::FromRawFd;
 use std::str;
 use std::sync::Arc;
 use std::thread::spawn as spawn_thread;
+use tracing::{debug, error, span, trace, Level};
 
 const BUF_SIZE: usize = 512;
 
@@ -97,16 +97,18 @@ impl HttpServer {
             // TODO should we do something with the JoinHandle returned by this spawn call?
             spawn_thread(move || {
                 let mut runtime = Runtime::new();
+                let span = span!(Level::TRACE, "worker_thread", worker = worker);
+                let _enter = span.enter();
                 runtime.block_on(async move {
                     // The thread should shutdown when the channel
                     // from the main thread is closed
                     while let Some(stream) = receiver.next().await {
-                        trace!("worker {} got stream", worker);
+                        trace!("worker got stream");
                         spawn(HttpServer::handle_http_requests(stream, handler.clone()));
                     }
                 });
                 let _runtime = runtime;
-                trace!("worker {} shutting down", worker);
+                debug!("thread exiting");
             });
         }
 
@@ -114,6 +116,8 @@ impl HttpServer {
         let mut runtime = Runtime::new();
 
         runtime.block_on(async move {
+            let span = span!(Level::TRACE, "accept_thread");
+            let _enter = span.enter();
             let mut next_worker: usize = 0;
 
             // Accept loop

@@ -5,12 +5,11 @@ mod server;
 mod syscall;
 
 use http::{Request, Response, StatusCode};
-use pretty_env_logger;
 // use runtime::Runtime;
 use server::HttpServer;
 
 fn main() {
-    pretty_env_logger::init();
+    tracing_subscriber::fmt::init();
 
     let handler = |_request: Request<&[u8]>| async {
         Response::builder()
