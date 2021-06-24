@@ -1,14 +1,18 @@
-use crate::runtime::spawn;
+use crate::runtime::{spawn, Runtime};
 use crate::syscall::{Accept, Close, Recv, Send};
 use futures::future::Future;
 use http::{Request, Response, Version};
 use httparse::{Request as ParseRequest, Status, EMPTY_HEADER};
-use log::{error, trace};
+use log::{debug, error, trace};
 use std::io::Error;
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::io::FromRawFd;
 use std::str;
-use std::sync::Arc;
+use std::sync::{
+    mpsc::{channel, TryRecvError},
+    Arc,
+};
+use std::thread::spawn as spawn_thread;
 
 const BUF_SIZE: usize = 512;
 
@@ -39,10 +43,9 @@ fn convert_http_request<T>(request: ParseRequest, body: T) -> Request<T> {
         .method(request.method.unwrap())
         .uri(request.path.unwrap())
         .version(Version::HTTP_11);
-    let builder =
-        request.headers.iter().fold(builder, |builder, header| {
-            builder.header(header.name, header.value)
-        });
+    let builder = request.headers.iter().fold(builder, |builder, header| {
+        builder.header(header.name, header.value)
+    });
     builder.body(body).unwrap()
 }
 
@@ -59,7 +62,7 @@ impl HttpServer {
     pub async fn serve<H, R>(self, handler: H)
     where
         H: (Fn(Request<&[u8]>) -> R) + 'static + std::marker::Send + Sync,
-        R: Future<Output = Response<Vec<u8>>> + std::marker::Send,
+        R: Future<Output = Response<Vec<u8>>> + 'static + std::marker::Send,
     {
         // Handler is wrapped in an Arc so it can be cloned each time a task is spawned
         let handler = Arc::new(handler);
@@ -68,93 +71,179 @@ impl HttpServer {
         loop {
             // TODO have more than 1 accept call in flight
             let fd = Accept::submit(&self.socket).await.unwrap();
-            let mut stream = unsafe { TcpStream::from_raw_fd(fd as i32) };
+            let stream = unsafe { TcpStream::from_raw_fd(fd as i32) };
 
             let handler_clone = handler.clone();
 
-            spawn(async move {
-                let mut buf: Vec<u8> = Vec::with_capacity(512);
-                let mut curr_chunk = 0;
+            spawn(HttpServer::handle_http_requests(stream, handler_clone));
+        }
+    }
 
-                loop {
-                    // Make sure the buf has enough space for the next chunk to be read
-                    buf.extend_from_slice(&[0; BUF_SIZE]);
+    pub fn run_on_threads<H, R>(self, threads: usize, handler: H)
+    where
+        H: (Fn(Request<&[u8]>) -> R) + 'static + std::marker::Send + Sync,
+        R: Future<Output = Response<Vec<u8>>> + 'static + std::marker::Send,
+    {
+        // Handler is wrapped in an Arc so it can be cloned each time a task is spawned
+        let handler = Arc::new(handler);
 
-                    // Receive the next chunk
-                    let start = curr_chunk * BUF_SIZE;
-                    let end = start + BUF_SIZE;
-                    // TODO read more than 512 bytes at a time
-                    let bytes_received = Recv::submit(&mut buf[start..end], &mut stream)
-                        .await
-                        .unwrap();
-                    curr_chunk += 1;
+        let num_workers = threads - 1;
+        let mut channels = Vec::new();
+        debug!("spawning {} worker threads", num_workers);
 
-                    if bytes_received == 0 {
-                        Close::submit(stream).await.unwrap();
-                        break;
+        // Spawn worker threads
+        for worker in 0..num_workers {
+            let handler = handler.clone();
+            let (sender, receiver) = channel::<TcpStream>();
+            channels.push(sender);
+
+            spawn_thread(move || {
+                let mut runtime = Runtime::new();
+
+                // The thread should shutdown when the channel
+                // from the main thread is closed
+                let mut should_shutdown = false;
+                let mut processing = false;
+                while !should_shutdown {
+                    // Only block waiting for new streams on the channel
+                    // if the runtime isn't already working on processing some streams
+                    let stream = if processing {
+                        match receiver.try_recv() {
+                            Ok(stream) => Some(stream),
+                            Err(TryRecvError::Disconnected) => {
+                                trace!("worker {} channel disconnected while waiting for stream (non-blocking)", worker);
+                                should_shutdown = true;
+                                None
+                            }
+                            Err(TryRecvError::Empty) => None,
+                        }
+                    } else {
+                        match receiver.recv() {
+                            Ok(stream) => Some(stream),
+                            Err(_err) => {
+                                trace!("worker {} channel disconnected while waiting for stream (blocking)", worker);
+                                should_shutdown = true;
+                                None
+                            }
+                        }
+                    };
+
+                    if let Some(stream) = stream {
+                        trace!("worker {} got a new stream", worker);
+                        runtime.spawn(HttpServer::handle_http_requests(stream, handler.clone()));
                     }
 
-                    // TODO what if there are more than this number of headers?
-                    let mut headers = [EMPTY_HEADER; 24];
-                    let mut request = ParseRequest::new(&mut headers);
+                    processing = runtime.tick();
+                }
+                trace!("worker {} shutting down", worker);
+            });
+        }
 
-                    // If we've gotten a complete request, call the handler with it
-                    // and return the response. If not, call recv again
-                    match request.parse(&buf) {
-                        Ok(Status::Complete(body_start)) => {
-                            // Find and parse the Content-Length header
-                            let content_length: Option<usize> = request
-                                .headers
-                                .iter()
-                                .find(|header| header.name.eq_ignore_ascii_case("content-length"))
-                                .and_then(|header| str::from_utf8(header.value).ok())
-                                .and_then(|s| s.parse::<usize>().ok());
+        // Set up accept loop
+        let mut runtime = Runtime::new();
 
-                            // Use the Content-Length header to determine whether we've received the full request body
-                            let (request, body) = match content_length {
-                                Some(content_length)
-                                    if body_start + content_length <= buf.len() =>
-                                {
-                                    trace!("Got request with content-length: {}", content_length);
-                                    (request, Some(&buf[body_start..body_start + content_length]))
-                                }
-                                Some(content_length) => {
-                                    // We haven't read the whole body yet
-                                    trace!("Request has content-length ({}) but we have only read {} bytes from the body so far", content_length, buf.len() - body_start);
-                                    continue;
-                                }
-                                None => {
-                                    // TODO should we error or figure out the length of the body
-                                    // some other way if no Content-Length header is found
-                                    trace!("Got request with no content-length header. Ignoring request body");
-                                    (request, None)
-                                }
-                            };
+        runtime.block_on(async move {
+            let mut next_worker: usize = 0;
 
-                            let request = convert_http_request(request, body.unwrap_or(&[]));
-                            let response = (handler_clone)(request).await;
-                            let mut response_buf = serialize_response(response);
-                            Send::submit(&mut response_buf, &mut stream).await.unwrap();
-                            break;
+            // Accept loop
+            loop {
+                // TODO have more than 1 accept call in flight
+                let fd = Accept::submit(&self.socket).await.unwrap();
+                let stream = unsafe { TcpStream::from_raw_fd(fd as i32) };
+
+                // Send streams to workers in round-robin fashion
+                // TODO determine which workers are busy before sending
+                channels[next_worker].send(stream).unwrap();
+                next_worker = (next_worker + 1) % num_workers;
+            }
+        });
+    }
+
+    async fn handle_http_requests<H, R>(mut stream: TcpStream, handler: Arc<H>)
+    where
+        H: (Fn(Request<&[u8]>) -> R) + 'static + std::marker::Send + Sync,
+        R: Future<Output = Response<Vec<u8>>> + 'static + std::marker::Send,
+    {
+        let mut buf: Vec<u8> = Vec::with_capacity(512);
+        let mut curr_chunk = 0;
+
+        loop {
+            // Make sure the buf has enough space for the next chunk to be read
+            buf.extend_from_slice(&[0; BUF_SIZE]);
+
+            // Receive the next chunk
+            let start = curr_chunk * BUF_SIZE;
+            let end = start + BUF_SIZE;
+            // TODO read more than 512 bytes at a time
+            let bytes_received = Recv::submit(&mut buf[start..end], &mut stream)
+                .await
+                .unwrap();
+            curr_chunk += 1;
+
+            if bytes_received == 0 {
+                Close::submit(stream).await.unwrap();
+                break;
+            }
+
+            // TODO what if there are more than this number of headers?
+            let mut headers = [EMPTY_HEADER; 24];
+            let mut request = ParseRequest::new(&mut headers);
+
+            // If we've gotten a complete request, call the handler with it
+            // and return the response. If not, call recv again
+            match request.parse(&buf) {
+                Ok(Status::Complete(body_start)) => {
+                    // Find and parse the Content-Length header
+                    let content_length: Option<usize> = request
+                        .headers
+                        .iter()
+                        .find(|header| header.name.eq_ignore_ascii_case("content-length"))
+                        .and_then(|header| str::from_utf8(header.value).ok())
+                        .and_then(|s| s.parse::<usize>().ok());
+
+                    // Use the Content-Length header to determine whether we've received the full request body
+                    let (request, body) = match content_length {
+                        Some(content_length) if body_start + content_length <= buf.len() => {
+                            trace!("Got request with content-length: {}", content_length);
+                            (request, Some(&buf[body_start..body_start + content_length]))
                         }
-                        Ok(Status::Partial) => {
-                            trace!("Got partial HTTP request");
+                        Some(content_length) => {
+                            // We haven't read the whole body yet
+                            trace!("Request has content-length ({}) but we have only read {} bytes from the body so far", content_length, buf.len() - body_start);
                             continue;
                         }
-                        Err(err) => {
-                            error!("Invalid HTTP request: {:?}", err);
-                            let response = Response::builder()
-                                .status(400)
-                                .body("Invalid HTTP Request".as_bytes().to_vec())
-                                .unwrap();
-                            Send::submit(&mut serialize_response(response), &mut stream)
-                                .await
-                                .unwrap();
-                            break;
+                        None => {
+                            // TODO should we error or figure out the length of the body
+                            // some other way if no Content-Length header is found
+                            trace!(
+                                "Got request with no content-length header. Ignoring request body"
+                            );
+                            (request, None)
                         }
-                    }
+                    };
+
+                    let request = convert_http_request(request, body.unwrap_or(&[]));
+                    let response = (handler)(request).await;
+                    let mut response_buf = serialize_response(response);
+                    Send::submit(&mut response_buf, &mut stream).await.unwrap();
+                    break;
                 }
-            })
+                Ok(Status::Partial) => {
+                    trace!("Got partial HTTP request");
+                    continue;
+                }
+                Err(err) => {
+                    error!("Invalid HTTP request: {:?}", err);
+                    let response = Response::builder()
+                        .status(400)
+                        .body("Invalid HTTP Request".as_bytes().to_vec())
+                        .unwrap();
+                    Send::submit(&mut serialize_response(response), &mut stream)
+                        .await
+                        .unwrap();
+                    break;
+                }
+            }
         }
     }
 }
