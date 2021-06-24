@@ -6,12 +6,11 @@ mod syscall;
 
 use http::{Request, Response, StatusCode};
 use pretty_env_logger;
-use runtime::Runtime;
+// use runtime::Runtime;
 use server::HttpServer;
 
 fn main() {
     pretty_env_logger::init();
-    let mut runtime = Runtime::new();
 
     let handler = |_request: Request<&[u8]>| async {
         Response::builder()
@@ -20,5 +19,8 @@ fn main() {
             .unwrap()
     };
     let server = HttpServer::bind("0.0.0.0:8889").expect("bind");
-    runtime.block_on(server.serve(handler));
+    server.run_on_threads(8, handler);
+
+    // let mut runtime = Runtime::new();
+    // runtime.run(server.serve(handler));
 }
