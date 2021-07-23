@@ -1,12 +1,12 @@
 mod executor;
+mod http_server;
 mod reactor;
 mod runtime;
-mod server;
 mod syscall;
 
 use http::{Request, Response, StatusCode};
 // use runtime::Runtime;
-use server::HttpServer;
+use http_server::HttpServer;
 
 fn main() {
     tracing_subscriber::fmt::init();
