@@ -1,10 +1,10 @@
 use io_uring::squeue::Entry;
-use std::marker::PhantomData;
-use std::io::Error;
-use std::sync::{Arc, Mutex};
 use std::future::Future;
-use std::pin::Pin;
+use std::io::Error;
+use std::marker::PhantomData;
 use std::mem;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 mod accept;
@@ -19,39 +19,38 @@ pub use send::Send;
 
 use crate::runtime::register;
 
+// This represents the possible states of a syscall
+// submitted to io-uring
 pub(crate) enum Lifecycle {
     Submitted,
     Waiting(Waker),
-    // TODO what do we do with this?
-    // Ignored,
     Completed(i32),
 }
 
 pub struct SysCall<T> {
     state: Arc<Mutex<Lifecycle>>,
-	kind: PhantomData<T>,
+    kind: PhantomData<T>,
 }
 
 impl<T> SysCall<T> {
-	pub fn from_entry(entry: Entry, _kind: T) -> SysCall<T> {
-		let state = Arc::new(Mutex::new(Lifecycle::Submitted));
-		let state_clone = state.clone();
+    pub fn from_entry(entry: Entry, _kind: T) -> SysCall<T> {
+        let state = Arc::new(Mutex::new(Lifecycle::Submitted));
+        let state_clone = state.clone();
         register(
             entry,
             Box::new(move |n: i32| {
-                let previous_state = mem::replace(
-                    &mut *(state_clone).lock().unwrap(),
-                    Lifecycle::Completed(n),
-                );
+                let previous_state =
+                    mem::replace(&mut *(state_clone).lock().unwrap(), Lifecycle::Completed(n));
                 if let Lifecycle::Waiting(waker) = previous_state {
                     waker.wake();
                 }
-            }));
-		SysCall {
-			state,
-			kind: PhantomData
-		}
-	}
+            }),
+        );
+        SysCall {
+            state,
+            kind: PhantomData,
+        }
+    }
 }
 
 impl<T> Future for SysCall<T> {
@@ -72,9 +71,6 @@ impl<T> Future for SysCall<T> {
                 }
                 Poll::Pending
             }
-            // Lifecycle::Ignored => {
-            //     unimplemented!("ignored futures aren't implemented yet");
-            // },
             Lifecycle::Completed(ret) => {
                 // todo, replace state with completed
                 if ret >= 0 {

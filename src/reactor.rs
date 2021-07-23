@@ -10,7 +10,6 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use tracing::{debug, error, trace};
 
 use thiserror::Error;
-// https://github.com/dtolnay/thiserror
 
 pub(crate) type ReactorSender = SyncSender<(Entry, Callback)>;
 
@@ -23,9 +22,7 @@ pub enum IouError {
 }
 
 pub(crate) type Callback = Box<dyn FnOnce(i32) + Send + 'static>;
-// TODO rename this
 
-// TODO switch this to an UnsafeCell instead of a Mutex
 pub(crate) struct Reactor(Rc<RefCell<Inner>>);
 
 struct Inner {

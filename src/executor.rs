@@ -10,7 +10,6 @@ use {
         sync::{Arc, Mutex},
         task::{Context, Poll},
     },
-    // The timer we wrote in the previous section:
 };
 
 /// Task executor that receives tasks off of a channel and runs them.
